@@ -39,50 +39,48 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class ChunkFinder extends Module {
     // ============ CHUNK FINDER CONSTANTS ============
-    private static final int SUSPICION_THRESHOLD = 30; // Increased from 26 to 30
+    private static final int SUSPICION_THRESHOLD = 35; // Increased from 30 to 35
     private static final int MAX_RENDER_DISTANCE = 32;
     private static final int CLEANUP_INTERVAL_MS = 30000;
     private static final int CHUNK_SCAN_DELAY_MS = 50;
-    private static final int CHUNKS_PER_TICK = 8; // Fixed at 8
+    private static final int CHUNKS_PER_TICK = 8;
+    private static final double TRACER_HEIGHT = 60.0; // Fixed tracer height at Y=60
 
     // Y-Level detection rules
-    private static final int DEEPSLATE_MAX_Y = 20;           // Rotated deepslate only below Y=20
-    private static final int BAMBOO_MIN_Y = -64;             // Bamboo at any Y
-    private static final int BAMBOO_MAX_Y = 320;             // Bamboo at any Y
-    private static final int VINES_MIN_Y = -64;              // Long vines at any Y
-    private static final int VINES_MAX_Y = 320;              // Long vines at any Y
-    private static final int AMETHYST_MIN_Y = -64;           // Amethyst at any Y
-    private static final int AMETHYST_MAX_Y = 320;           // Amethyst at any Y
-    private static final int SPAWNER_MIN_Y = -64;            // Spawners at any Y
-    private static final int SPAWNER_MAX_Y = 320;            // Spawners at any Y
-    private static final int BEEHIVE_MIN_Y = -64;            // Beehives at any Y
-    private static final int BEEHIVE_MAX_Y = 320;            // Beehives at any Y
+    private static final int DEEPSLATE_MAX_Y = 20;
+    private static final int BAMBOO_MIN_Y = -64;
+    private static final int BAMBOO_MAX_Y = 320;
+    private static final int VINES_MIN_Y = -64;
+    private static final int VINES_MAX_Y = 320;
+    private static final int AMETHYST_MIN_Y = -64;
+    private static final int AMETHYST_MAX_Y = 320;
+    private static final int SPAWNER_MIN_Y = -64;
+    private static final int SPAWNER_MAX_Y = 320;
+    private static final int BEEHIVE_MIN_Y = -64;
+    private static final int BEEHIVE_MAX_Y = 320;
 
     // Detection thresholds
     private static final int BAMBOO_HEIGHT_THRESHOLD = 16;
-    private static final int AMETHYST_CLUSTER_REQUIRED = 5;  // Need 5+ clusters to count
-    private static final int AMETHYST_CLUSTER_POINTS = 6;    // Increased from 5 to 6
+    private static final int AMETHYST_CLUSTER_REQUIRED = 5;
+    private static final int AMETHYST_CLUSTER_POINTS = 6;
     private static final int LONG_VINES_THRESHOLD = 30;
-    private static final int ROTATED_DEEPSLATE_POINTS = 3;    // Increased from 2 to 3
-    private static final int SPAWNER_POINTS = 10;             // Increased from 8 to 10
+    private static final int ROTATED_DEEPSLATE_POINTS = 3;
+    private static final int SPAWNER_POINTS = 10;
     
-    // New detection thresholds
-    private static final int TRADER_LLAMA_REQUIRED = 2;      // Need 2 trader llamas
-    private static final int WANDERING_TRADER_REQUIRED = 1;  // Need 1 wandering trader
-    private static final int TRADER_COMBO_POINTS = 9;        // Increased from 7 to 9
-    private static final int BEEHIVE_HONEY_POINTS = 5;        // Increased from 4 to 5
+    private static final int TRADER_LLAMA_REQUIRED = 2;
+    private static final int WANDERING_TRADER_REQUIRED = 1;
+    private static final int TRADER_COMBO_POINTS = 9;
+    private static final int BEEHIVE_HONEY_POINTS = 5;
 
     // ============ HOLE ESP CONSTANTS ============
     private static final Direction[] DIRECTIONS = { Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH };
     private static final int MIN_HOLE_DEPTH = 4;
 
     // ============ COLORS ============
-    // Chunk Finder colors
     private static final Color CHUNK_COLOR = new Color(150, 255, 150, 180);
     private static final Color CHUNK_OUTLINE_COLOR = new Color(100, 255, 100, 255);
-    private static final Color TRACER_COLOR = new Color(100, 255, 100, 200); // Same green for tracers
+    private static final Color TRACER_COLOR = new Color(100, 255, 100, 200);
     
-    // Hole ESP colors
     private static final Color HOLE_1X1_LINE = new Color(255, 255, 255, 200);
     private static final Color HOLE_1X1_SIDE = new Color(255, 255, 255, 100);
     private static final Color HOLE_3X1_LINE = new Color(255, 255, 0, 200);
@@ -92,7 +90,6 @@ public class ChunkFinder extends Module {
     private final SettingGroup sgGeneral = settings.createGroup("General");
     private final SettingGroup sgRender = settings.createGroup("Rendering");
 
-    // Hole ESP toggle
     private final Setting<Boolean> holeESP = sgGeneral.add(new BoolSetting.Builder()
         .name("hole-esp")
         .description("Highlight 1x1 and 3x1 holes")
@@ -100,28 +97,14 @@ public class ChunkFinder extends Module {
         .build()
     );
 
-    // NEW: Chunk Tracer toggle
     private final Setting<Boolean> chunkTracer = sgRender.add(new BoolSetting.Builder()
         .name("chunk-tracer")
-        .description("Draw a tracer line to detected chunks")
+        .description("Draw smooth tracers to detected chunks at Y=60")
         .defaultValue(true)
         .build()
     );
 
-    // Tracer settings
-    private final Setting<Integer> tracerHeight = sgRender.add(new IntSetting.Builder()
-        .name("tracer-height")
-        .description("Height to draw tracer lines from")
-        .defaultValue(60)
-        .min(-64)
-        .max(320)
-        .sliderRange(-64, 320)
-        .visible(chunkTracer::get)
-        .build()
-    );
-
     // ============ DATA STRUCTURES ============
-    // Chunk Finder data
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
     private final Map<ChunkPos, ChunkAnalysis> chunkDataMap = new ConcurrentHashMap<>();
     private final Map<ChunkPos, Long> totalLoadTime = new ConcurrentHashMap<>();
@@ -132,13 +115,13 @@ public class ChunkFinder extends Module {
     private final Map<UUID, Set<ChunkPos>> sessionChunks = new ConcurrentHashMap<>();
     private UUID currentSessionId;
 
-    // Hole ESP data
+    // For merged tracers - groups adjacent chunks
+    private final Map<ChunkGroupKey, ChunkGroup> chunkGroups = new ConcurrentHashMap<>();
+
     private final Long2ObjectMap<HoleChunk> holeChunks = new Long2ObjectOpenHashMap<>();
     private final Queue<Chunk> chunkQueue = new LinkedList<>();
     private final Set<Box> holes1x1 = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<Box> holes3x1 = Collections.newSetFromMap(new ConcurrentHashMap<>());
-
-    // Entity tracking for trader detection
     private final Map<ChunkPos, EntityCount> entityCounts = new ConcurrentHashMap<>();
 
     public ChunkFinder() {
@@ -178,6 +161,88 @@ public class ChunkFinder extends Module {
         }
     }
 
+    // Key for chunk groups (based on group ID)
+    private static class ChunkGroupKey {
+        final int id;
+        
+        ChunkGroupKey(int id) {
+            this.id = id;
+        }
+        
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ChunkGroupKey that = (ChunkGroupKey) o;
+            return id == that.id;
+        }
+        
+        @Override
+        public int hashCode() {
+            return id;
+        }
+    }
+
+    // Class to group adjacent chunks for merged tracers
+    private static class ChunkGroup {
+        final Set<ChunkPos> chunks = new HashSet<>();
+        double centerX;
+        double centerZ;
+        boolean dirty = true;
+        int groupId;
+        
+        ChunkGroup(int id) {
+            this.groupId = id;
+        }
+        
+        void addChunk(ChunkPos pos) {
+            chunks.add(pos);
+            dirty = true;
+        }
+        
+        void removeChunk(ChunkPos pos) {
+            chunks.remove(pos);
+            dirty = true;
+        }
+        
+        boolean isEmpty() {
+            return chunks.isEmpty();
+        }
+        
+        void updateCenter() {
+            if (chunks.isEmpty()) return;
+            double sumX = 0, sumZ = 0;
+            for (ChunkPos pos : chunks) {
+                sumX += pos.getStartX() + 8;
+                sumZ += pos.getStartZ() + 8;
+            }
+            centerX = sumX / chunks.size();
+            centerZ = sumZ / chunks.size();
+            dirty = false;
+        }
+        
+        double getCenterX() {
+            if (dirty) updateCenter();
+            return centerX;
+        }
+        
+        double getCenterZ() {
+            if (dirty) updateCenter();
+            return centerZ;
+        }
+        
+        boolean isAdjacent(ChunkPos pos) {
+            for (ChunkPos chunk : chunks) {
+                int dx = Math.abs(chunk.x - pos.x);
+                int dz = Math.abs(chunk.z - pos.z);
+                if (dx <= 1 && dz <= 1 && !(dx == 0 && dz == 0)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     // ============ MODULE LIFECYCLE ============
     @Override
     public void onActivate() {
@@ -208,11 +273,55 @@ public class ChunkFinder extends Module {
         sessionChunks.clear();
         currentSessionId = null;
         entityCounts.clear();
+        chunkGroups.clear();
         
         holeChunks.clear();
         chunkQueue.clear();
         holes1x1.clear();
         holes3x1.clear();
+    }
+
+    // ============ CHUNK GROUP MANAGEMENT ============
+    private void updateChunkGroups() {
+        chunkGroups.clear();
+        
+        if (suspiciousChunks.isEmpty()) return;
+        
+        // Create a list of all suspicious chunks
+        List<ChunkPos> chunks = new ArrayList<>(suspiciousChunks);
+        boolean[] processed = new boolean[chunks.size()];
+        int nextGroupId = 0;
+        
+        // Group adjacent chunks using BFS
+        for (int i = 0; i < chunks.size(); i++) {
+            if (processed[i]) continue;
+            
+            ChunkGroup group = new ChunkGroup(nextGroupId++);
+            Queue<ChunkPos> queue = new LinkedList<>();
+            queue.add(chunks.get(i));
+            processed[i] = true;
+            
+            while (!queue.isEmpty()) {
+                ChunkPos current = queue.poll();
+                group.addChunk(current);
+                
+                // Find all adjacent chunks
+                for (int j = 0; j < chunks.size(); j++) {
+                    if (processed[j]) continue;
+                    
+                    ChunkPos other = chunks.get(j);
+                    int dx = Math.abs(current.x - other.x);
+                    int dz = Math.abs(current.z - other.z);
+                    
+                    if (dx <= 1 && dz <= 1) {
+                        queue.add(other);
+                        processed[j] = true;
+                    }
+                }
+            }
+            
+            chunkGroups.put(new ChunkGroupKey(group.groupId), group);
+        }
     }
 
     // ============ SCANNING ============
@@ -249,7 +358,6 @@ public class ChunkFinder extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
 
-        // Track session chunks
         if (currentSessionId != null) {
             Set<ChunkPos> session = sessionChunks.get(currentSessionId);
             if (session != null) {
@@ -261,12 +369,10 @@ public class ChunkFinder extends Module {
             }
         }
 
-        // Scan entities every 20 ticks (1 second)
         if (mc.world.getTime() % 20 == 0) {
             scanEntities();
         }
 
-        // Process hole ESP chunks
         if (holeESP.get()) {
             synchronized (holeChunks) {
                 for (HoleChunk hChunk : holeChunks.values()) hChunk.marked = false;
@@ -286,7 +392,6 @@ public class ChunkFinder extends Module {
             removeDistantHoles();
         }
 
-        // Clean up distant chunks
         if (mc.world.getTime() % 200 == 0) {
             cleanupDistantChunks();
         }
@@ -408,7 +513,6 @@ public class ChunkFinder extends Module {
         Block block = state.getBlock();
         int y = pos.getY();
         
-        // Bamboo
         if (block == Blocks.BAMBOO && y >= BAMBOO_MIN_Y && y <= BAMBOO_MAX_Y) {
             int height = getPlantHeight(pos, block);
             if (height >= BAMBOO_HEIGHT_THRESHOLD) {
@@ -416,12 +520,10 @@ public class ChunkFinder extends Module {
             }
         }
         
-        // Amethyst clusters
         if (block == Blocks.AMETHYST_CLUSTER && y >= AMETHYST_MIN_Y && y <= AMETHYST_MAX_Y) {
             analysis.amethystClusters++;
         }
         
-        // Long vines
         if ((block == Blocks.VINE || block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT) &&
             y >= VINES_MIN_Y && y <= VINES_MAX_Y) {
             int height = getVineHeight(pos);
@@ -430,7 +532,6 @@ public class ChunkFinder extends Module {
             }
         }
         
-        // Rotated deepslate
         if (block == Blocks.DEEPSLATE && y <= DEEPSLATE_MAX_Y) {
             if (state.contains(net.minecraft.state.property.Properties.AXIS)) {
                 var axis = state.get(net.minecraft.state.property.Properties.AXIS);
@@ -440,12 +541,10 @@ public class ChunkFinder extends Module {
             }
         }
         
-        // Spawners
         if (block == Blocks.SPAWNER && y >= SPAWNER_MIN_Y && y <= SPAWNER_MAX_Y) {
             analysis.spawners++;
         }
         
-        // Beehive with honey level 5
         if (block == Blocks.BEEHIVE || block == Blocks.BEE_NEST) {
             if (state.contains(net.minecraft.state.property.Properties.HONEY_LEVEL)) {
                 int honeyLevel = state.get(net.minecraft.state.property.Properties.HONEY_LEVEL);
@@ -497,34 +596,23 @@ public class ChunkFinder extends Module {
     private int calculateScore(ChunkPos pos, ChunkAnalysis data) {
         int score = 0;
         
-        // Bamboo
         score += data.bambooCount * 4;
         
-        // Amethyst clusters - only count if 5 or more
         if (data.amethystClusters >= AMETHYST_CLUSTER_REQUIRED) {
             score += data.amethystClusters * AMETHYST_CLUSTER_POINTS;
         }
         
-        // Long vines
         score += data.longVines * 2;
-        
-        // Rotated deepslate
         score += data.rotatedDeepslate * ROTATED_DEEPSLATE_POINTS;
-        
-        // Spawners
         score += data.spawners * SPAWNER_POINTS;
-        
-        // Beehives with honey level 5
         score += data.beehivesHoney5 * BEEHIVE_HONEY_POINTS;
         
-        // Trader + Llamas combo
         if (data.traderLlamas >= TRADER_LLAMA_REQUIRED && data.wanderingTraders >= WANDERING_TRADER_REQUIRED) {
             score += TRADER_COMBO_POINTS;
         }
         
-        // Chunk uptime bonuses
         Long totalTime = totalLoadTime.get(pos);
-        if (totalTime != null && totalTime >= 600000) score += 5; // 10 minutes
+        if (totalTime != null && totalTime >= 600000) score += 5;
         
         if (sessionChunks.size() >= 2) {
             int sessionsSeen = 0;
@@ -535,7 +623,7 @@ public class ChunkFinder extends Module {
         }
         
         Long totalLoad = totalLoadTime.get(pos);
-        if (totalLoad != null && totalLoad >= 1800000) score += 20; // 30 minutes
+        if (totalLoad != null && totalLoad >= 1800000) score += 20;
         
         return score;
     }
@@ -549,8 +637,11 @@ public class ChunkFinder extends Module {
             data.traderLlamas >= TRADER_LLAMA_REQUIRED && 
             data.wanderingTraders >= WANDERING_TRADER_REQUIRED;
         
+        boolean wasAdded = false;
+        
         if (score >= SUSPICION_THRESHOLD || hasSpawners || hasTraderCombo) {
-            if (suspiciousChunks.add(pos)) {
+            wasAdded = suspiciousChunks.add(pos);
+            if (wasAdded) {
                 String reason;
                 if (hasSpawners) {
                     reason = "Spawner detected!";
@@ -569,14 +660,19 @@ public class ChunkFinder extends Module {
                 });
             }
         } else {
-            suspiciousChunks.remove(pos);
+            wasAdded = suspiciousChunks.remove(pos);
+        }
+        
+        // Update chunk groups if the set changed
+        if (wasAdded) {
+            updateChunkGroups();
         }
     }
 
     // ============ HOLE ESP LOGIC ============
     private void processHoleChunkQueue() {
         int processed = 0;
-        while (!chunkQueue.isEmpty() && processed < CHUNKS_PER_TICK) { // Fixed at 8
+        while (!chunkQueue.isEmpty() && processed < CHUNKS_PER_TICK) {
             Chunk chunk = chunkQueue.poll();
             if (chunk != null) {
                 HoleChunk hChunk = new HoleChunk(chunk.getPos().x, chunk.getPos().z);
@@ -733,7 +829,9 @@ public class ChunkFinder extends Module {
         int playerX = (int) mc.player.getX() >> 4;
         int playerZ = (int) mc.player.getZ() >> 4;
 
-        suspiciousChunks.removeIf(pos -> {
+        boolean changed = false;
+        
+        changed |= suspiciousChunks.removeIf(pos -> {
             int dx = Math.abs(pos.x - playerX);
             int dz = Math.abs(pos.z - playerZ);
             return dx > MAX_RENDER_DISTANCE || dz > MAX_RENDER_DISTANCE;
@@ -757,11 +855,16 @@ public class ChunkFinder extends Module {
             return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
         });
         
-        entityCounts.entrySet().removeIf(entry -> {
+        changed |= !entityCounts.entrySet().removeIf(entry -> {
             int dx = Math.abs(entry.getKey().x - playerX);
             int dz = Math.abs(entry.getKey().z - playerZ);
             return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
         });
+        
+        // Update chunk groups if suspicious chunks changed
+        if (changed) {
+            updateChunkGroups();
+        }
     }
 
     // ============ RENDERING ============
@@ -769,21 +872,44 @@ public class ChunkFinder extends Module {
     private void onRender3D(Render3DEvent event) {
         if (mc.player == null || !isActive()) return;
 
+        // Use interpolated position for smooth movement (like ClusterFinder)
+        Vec3d playerPos = mc.player.getLerpedPos(event.tickDelta);
+        
+        // Calculate camera/eye position for tracers
         Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
-        Vec3d playerPos = mc.player.getPos();
+        
+        // Determine start position based on perspective (like ClusterFinder)
+        Vec3d startPos;
+        if (mc.options.getPerspective().isFirstPerson()) {
+            // First person: start tracer slightly forward from camera for better visibility
+            Vec3d lookDirection = mc.player.getRotationVector();
+            startPos = new Vec3d(
+                playerPos.x + lookDirection.x * 0.5,
+                playerPos.y + mc.player.getEyeHeight(mc.player.getPose()) + lookDirection.y * 0.5,
+                playerPos.z + lookDirection.z * 0.5
+            );
+        } else {
+            // Third person: use normal eye position
+            startPos = new Vec3d(
+                playerPos.x,
+                playerPos.y + mc.player.getEyeHeight(mc.player.getPose()),
+                playerPos.z
+            );
+        }
 
         // Render tracers first (so they appear behind chunks)
-        if (chunkTracer.get() && !suspiciousChunks.isEmpty()) {
-            for (ChunkPos pos : suspiciousChunks) {
-                // Calculate chunk center position
-                double chunkCenterX = pos.getStartX() + 8;
-                double chunkCenterZ = pos.getStartZ() + 8;
-                double tracerY = tracerHeight.get();
+        if (chunkTracer.get() && !chunkGroups.isEmpty()) {
+            for (ChunkGroup group : chunkGroups.values()) {
+                if (group.isEmpty()) continue;
                 
-                // Draw tracer from player to chunk
+                // Draw one tracer per group at the center point at Y=60
+                double targetX = group.getCenterX();
+                double targetZ = group.getCenterZ();
+                double targetY = TRACER_HEIGHT;
+                
                 event.renderer.line(
-                    playerPos.x, playerPos.y + 1, playerPos.z,
-                    chunkCenterX, tracerY, chunkCenterZ,
+                    startPos.x, startPos.y, startPos.z,
+                    targetX, targetY, targetZ,
                     TRACER_COLOR
                 );
             }
