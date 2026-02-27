@@ -1,901 +1,838 @@
 package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.network.MeteorExecutor;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
+import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.sound.PositionedSoundInstance;
-import net.minecraft.fluid.FluidState;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.passive.TraderLlamaEntity;
+import net.minecraft.entity.passive.WanderingTraderEntity;
 import net.minecraft.item.Items;
 import net.minecraft.sound.SoundEvents;
-import net.minecraft.state.property.Properties;
-import net.minecraft.text.Text;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.ChunkPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.*;
+import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
-import meteordevelopment.meteorclient.utils.render.color.Color;
-import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.Queue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class ChunkFinder extends Module {
-    public enum Mode {
-        Chat,
-        Toast,
-        Both
-    }
+    // ============ CHUNK FINDER CONSTANTS ============
+    private static final int SUSPICION_THRESHOLD = 30; // Increased from 26 to 30
+    private static final int MAX_RENDER_DISTANCE = 32;
+    private static final int CLEANUP_INTERVAL_MS = 30000;
+    private static final int CHUNK_SCAN_DELAY_MS = 50;
+    private static final int CHUNKS_PER_TICK = 8; // Fixed at 8
 
-    private final SettingGroup sgDetection = settings.createGroup("Detection");
-    private final SettingGroup sgRender = settings.createGroup("Render");
-    private final SettingGroup sgBlockHighlight = settings.createGroup("Block Highlighting");
-    private final SettingGroup sgPerformance = settings.createGroup("Performance");
-    private final SettingGroup sgNotifications = settings.createGroup("Notifications");
+    // Y-Level detection rules
+    private static final int DEEPSLATE_MAX_Y = 20;           // Rotated deepslate only below Y=20
+    private static final int BAMBOO_MIN_Y = -64;             // Bamboo at any Y
+    private static final int BAMBOO_MAX_Y = 320;             // Bamboo at any Y
+    private static final int VINES_MIN_Y = -64;              // Long vines at any Y
+    private static final int VINES_MAX_Y = 320;              // Long vines at any Y
+    private static final int AMETHYST_MIN_Y = -64;           // Amethyst at any Y
+    private static final int AMETHYST_MAX_Y = 320;           // Amethyst at any Y
+    private static final int SPAWNER_MIN_Y = -64;            // Spawners at any Y
+    private static final int SPAWNER_MAX_Y = 320;            // Spawners at any Y
+    private static final int BEEHIVE_MIN_Y = -64;            // Beehives at any Y
+    private static final int BEEHIVE_MAX_Y = 320;            // Beehives at any Y
 
-    private final Setting<Boolean> detectDeepslate = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-deepslate")
-        .description("Find deepslate blocks")
-        .defaultValue(false)
-        .build());
+    // Detection thresholds
+    private static final int BAMBOO_HEIGHT_THRESHOLD = 16;
+    private static final int AMETHYST_CLUSTER_REQUIRED = 5;  // Need 5+ clusters to count
+    private static final int AMETHYST_CLUSTER_POINTS = 6;    // Increased from 5 to 6
+    private static final int LONG_VINES_THRESHOLD = 30;
+    private static final int ROTATED_DEEPSLATE_POINTS = 3;    // Increased from 2 to 3
+    private static final int SPAWNER_POINTS = 10;             // Increased from 8 to 10
+    
+    // New detection thresholds
+    private static final int TRADER_LLAMA_REQUIRED = 2;      // Need 2 trader llamas
+    private static final int WANDERING_TRADER_REQUIRED = 1;  // Need 1 wandering trader
+    private static final int TRADER_COMBO_POINTS = 9;        // Increased from 7 to 9
+    private static final int BEEHIVE_HONEY_POINTS = 5;        // Increased from 4 to 5
 
-    private final Setting<Boolean> detectCobbledDeepslate = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-cobbled-deepslate")
-        .description("Find cobbled deepslate blocks")
+    // ============ HOLE ESP CONSTANTS ============
+    private static final Direction[] DIRECTIONS = { Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH };
+    private static final int MIN_HOLE_DEPTH = 4;
+
+    // ============ COLORS ============
+    // Chunk Finder colors
+    private static final Color CHUNK_COLOR = new Color(150, 255, 150, 180);
+    private static final Color CHUNK_OUTLINE_COLOR = new Color(100, 255, 100, 255);
+    private static final Color TRACER_COLOR = new Color(100, 255, 100, 200); // Same green for tracers
+    
+    // Hole ESP colors
+    private static final Color HOLE_1X1_LINE = new Color(255, 255, 255, 200);
+    private static final Color HOLE_1X1_SIDE = new Color(255, 255, 255, 100);
+    private static final Color HOLE_3X1_LINE = new Color(255, 255, 0, 200);
+    private static final Color HOLE_3X1_SIDE = new Color(255, 255, 0, 100);
+
+    // ============ SETTINGS ============
+    private final SettingGroup sgGeneral = settings.createGroup("General");
+    private final SettingGroup sgRender = settings.createGroup("Rendering");
+
+    // Hole ESP toggle
+    private final Setting<Boolean> holeESP = sgGeneral.add(new BoolSetting.Builder()
+        .name("hole-esp")
+        .description("Highlight 1x1 and 3x1 holes")
         .defaultValue(true)
-        .build());
+        .build()
+    );
 
-    private final Setting<Boolean> detectRotatedDeepslate = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-rotated-deepslate")
-        .description("Find rotated deepslate blocks")
+    // NEW: Chunk Tracer toggle
+    private final Setting<Boolean> chunkTracer = sgRender.add(new BoolSetting.Builder()
+        .name("chunk-tracer")
+        .description("Draw a tracer line to detected chunks")
         .defaultValue(true)
-        .build());
+        .build()
+    );
 
-    private final Setting<Boolean> detectEndStone = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-end-stone")
-        .description("Find end stone blocks (disabled in The End dimension)")
-        .defaultValue(true)
-        .build());
+    // Tracer settings
+    private final Setting<Integer> tracerHeight = sgRender.add(new IntSetting.Builder()
+        .name("tracer-height")
+        .description("Height to draw tracer lines from")
+        .defaultValue(60)
+        .min(-64)
+        .max(320)
+        .sliderRange(-64, 320)
+        .visible(chunkTracer::get)
+        .build()
+    );
 
-    private final Setting<Boolean> ignoreExposed = sgDetection.add(new BoolSetting.Builder()
-        .name("ignore-exposed")
-        .description("Ignore suspicious blocks that are exposed to air or fluid (treats water/lava like air)")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Boolean> ignoreTrialChambers = sgDetection.add(new BoolSetting.Builder()
-        .name("ignore-trial-chambers")
-        .description("Ignore chunks containing trial chambers (based on waxed copper blocks and tuff bricks)")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> trialChamberThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("trial-chamber-threshold")
-        .description("Minimum waxed copper or tuff brick blocks to identify a trial chamber")
-        .defaultValue(50)
-        .range(1, 50)
-        .sliderRange(1, 50)
-        .visible(ignoreTrialChambers::get)
-        .build());
-
-    private final Setting<Integer> deepslateThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("deepslate-threshold")
-        .description("Min deepslate to flag chunk")
-        .defaultValue(1)
-        .range(1, 15)
-        .sliderRange(1, 15)
-        .visible(detectDeepslate::get)
-        .build());
-
-    private final Setting<Integer> cobbledDeepslateThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("cobbled-deepslate-threshold")
-        .description("Min cobbled deepslate to flag chunk")
-        .defaultValue(4)
-        .range(1, 15)
-        .sliderRange(1, 15)
-        .visible(detectCobbledDeepslate::get)
-        .build());
-
-    private final Setting<Integer> rotatedDeepslateThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("rotated-threshold")
-        .description("Min rotated deepslate to flag chunk")
-        .defaultValue(3)
-        .range(1, 20)
-        .sliderRange(1, 20)
-        .visible(detectRotatedDeepslate::get)
-        .build());
-
-    private final Setting<Integer> endStoneThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("end-stone-threshold")
-        .description("Min end stone count to flag chunk")
-        .defaultValue(2)
-        .range(1, 15)
-        .sliderRange(1, 15)
-        .visible(detectEndStone::get)
-        .build());
-
-    private final Setting<Double> renderY = sgRender.add(new DoubleSetting.Builder()
-        .name("render-height")
-        .description("Height to render chunk highlights")
-        .defaultValue(64.0)
-        .range(-64.0, 320.0)
-        .sliderRange(-64.0, 320.0)
-        .build());
-
-    private final Setting<ShapeMode> renderMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("render-mode")
-        .description("How to render highlighted chunks")
-        .defaultValue(ShapeMode.Both)
-        .build());
-
-    private final Setting<SettingColor> chunkColor = sgRender.add(new ColorSetting.Builder()
-        .name("chunk-color")
-        .description("Color for suspicious chunks")
-        .defaultValue(new SettingColor(255, 215, 0, 120))
-        .build());
-
-    private final Setting<Double> thickness = sgRender.add(new DoubleSetting.Builder()
-        .name("thickness")
-        .description("Thickness of highlight box")
-        .defaultValue(0.3)
-        .range(0.1, 2.0)
-        .sliderRange(0.1, 2.0)
-        .build());
-
-    private final Setting<Boolean> highlightBlocks = sgBlockHighlight.add(new BoolSetting.Builder()
-        .name("highlight-blocks")
-        .description("Highlight individual suspicious blocks")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> maxBlocksToRender = sgBlockHighlight.add(new IntSetting.Builder()
-        .name("max-blocks-render")
-        .description("Maximum number of blocks to highlight (performance)")
-        .defaultValue(200)
-        .range(50, 1000)
-        .sliderRange(50, 1000)
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<ShapeMode> blockRenderMode = sgBlockHighlight.add(new EnumSetting.Builder<ShapeMode>()
-        .name("block-render-mode")
-        .description("How to render individual blocks")
-        .defaultValue(ShapeMode.Lines)
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<SettingColor> deepslateBlockColor = sgBlockHighlight.add(new ColorSetting.Builder()
-        .name("deepslate-color")
-        .description("Color for deepslate blocks")
-        .defaultValue(new SettingColor(100, 100, 100, 200))
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<SettingColor> cobbledDeepslateBlockColor = sgBlockHighlight.add(new ColorSetting.Builder()
-        .name("cobbled-deepslate-color")
-        .description("Color for cobbled deepslate blocks")
-        .defaultValue(new SettingColor(80, 80, 80, 200))
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<SettingColor> rotatedDeepslateBlockColor = sgBlockHighlight.add(new ColorSetting.Builder()
-        .name("rotated-deepslate-color")
-        .description("Color for rotated deepslate blocks")
-        .defaultValue(new SettingColor(120, 0, 120, 200))
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<SettingColor> endStoneBlockColor = sgBlockHighlight.add(new ColorSetting.Builder()
-        .name("end-stone-color")
-        .description("Color for end stone blocks")
-        .defaultValue(new SettingColor(255, 255, 200, 200))
-        .visible(highlightBlocks::get)
-        .build());
-
-    private final Setting<Boolean> useMultiThreading = sgPerformance.add(new BoolSetting.Builder()
-        .name("threading")
-        .description("Use background threads for scanning")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> threadCount = sgPerformance.add(new IntSetting.Builder()
-        .name("thread-count")
-        .description("Number of worker threads")
-        .defaultValue(Math.max(1, Runtime.getRuntime().availableProcessors() / 2))
-        .range(1, 4)
-        .sliderRange(1, 4)
-        .visible(useMultiThreading::get)
-        .build());
-
-    private final Setting<Integer> scanInterval = sgPerformance.add(new IntSetting.Builder()
-        .name("scan-delay")
-        .description("Milliseconds between scans")
-        .defaultValue(100)
-        .range(50, 2000)
-        .sliderRange(50, 2000)
-        .build());
-
-    private final Setting<Integer> maxConcurrentScans = sgPerformance.add(new IntSetting.Builder()
-        .name("max-concurrent-scans")
-        .description("Max chunks scanned simultaneously")
-        .defaultValue(3)
-        .range(1, 8)
-        .sliderRange(1, 8)
-        .build());
-
-    private final Setting<Integer> cleanupInterval = sgPerformance.add(new IntSetting.Builder()
-        .name("cleanup-interval")
-        .description("Seconds between distant chunk cleanup")
-        .defaultValue(30)
-        .range(15, 300)
-        .sliderRange(15, 300)
-        .build());
-
-    private final Setting<Mode> notificationMode = sgNotifications.add(new EnumSetting.Builder<Mode>()
-        .name("notification-mode")
-        .description("How to notify when suspicious chunks are detected")
-        .defaultValue(Mode.Both)
-        .build());
-
-    private final Setting<Boolean> playSound = sgNotifications.add(new BoolSetting.Builder()
-        .name("sound-alerts")
-        .description("Play sound when suspicious chunks or blocks are found")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Boolean> chatAlerts = sgNotifications.add(new BoolSetting.Builder()
-        .name("chat-alerts")
-        .description("Send chat notifications for suspicious chunks or blocks")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Boolean> trialChamberAlerts = sgNotifications.add(new BoolSetting.Builder()
-        .name("trial-chamber-alerts")
-        .description("Send chat notifications for trial chambers")
-        .defaultValue(false)
-        .build());
-
-    private final Setting<Integer> maxAlerts = sgNotifications.add(new IntSetting.Builder()
-        .name("max-alerts")
-        .description("Max alerts per minute")
-        .defaultValue(5)
-        .range(1, 20)
-        .sliderRange(1, 20)
-        .build());
-
-    private final Set<ChunkPos> flaggedChunks = ConcurrentHashMap.newKeySet();
-    private final ConcurrentHashMap<ChunkPos, ChunkAnalysis> chunkData = new ConcurrentHashMap<>();
+    // ============ DATA STRUCTURES ============
+    // Chunk Finder data
+    private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
+    private final Map<ChunkPos, ChunkAnalysis> chunkDataMap = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Long> totalLoadTime = new ConcurrentHashMap<>();
     private final Set<ChunkPos> scannedChunks = ConcurrentHashMap.newKeySet();
-    private final ConcurrentHashMap<ChunkPos, Long> notificationTimes = new ConcurrentHashMap<>();
-    private final Queue<Long> recentAlerts = new ConcurrentLinkedQueue<>();
-    private final AtomicLong activeScanCount = new AtomicLong(0);
-    private final Map<BlockPos, SuspiciousBlock> suspiciousBlocks = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Long> lastScanTime = new ConcurrentHashMap<>();
+    private final AtomicInteger activeScans = new AtomicInteger(0);
+    private final AtomicBoolean isScanning = new AtomicBoolean(false);
+    private final Map<UUID, Set<ChunkPos>> sessionChunks = new ConcurrentHashMap<>();
+    private UUID currentSessionId;
 
-    private ExecutorService scannerPool;
-    private volatile boolean shouldScan = false;
-    private long lastCleanup = 0;
+    // Hole ESP data
+    private final Long2ObjectMap<HoleChunk> holeChunks = new Long2ObjectOpenHashMap<>();
+    private final Queue<Chunk> chunkQueue = new LinkedList<>();
+    private final Set<Box> holes1x1 = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Set<Box> holes3x1 = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    // Entity tracking for trader detection
+    private final Map<ChunkPos, EntityCount> entityCounts = new ConcurrentHashMap<>();
 
     public ChunkFinder() {
-        super(GlazedAddon.esp, "chunk-finder", "ChunkFinderV4");
+        super(GlazedAddon.esp, "chunk-finder", "Finds suspicious chunks and highlights holes");
     }
 
+    // ============ DATA CLASSES ============
+    private static class ChunkAnalysis {
+        int bambooCount = 0;
+        int amethystClusters = 0;
+        int longVines = 0;
+        int rotatedDeepslate = 0;
+        int spawners = 0;
+        int traderLlamas = 0;
+        int wanderingTraders = 0;
+        int beehivesHoney5 = 0;
+    }
+
+    private static class EntityCount {
+        int traderLlamas = 0;
+        int wanderingTraders = 0;
+        long lastUpdate = 0;
+    }
+
+    private static class HoleChunk {
+        final int x, z;
+        boolean marked;
+        
+        HoleChunk(int x, int z) {
+            this.x = x;
+            this.z = z;
+            this.marked = true;
+        }
+        
+        long getKey() {
+            return ChunkPos.toLong(x, z);
+        }
+    }
+
+    // ============ MODULE LIFECYCLE ============
     @Override
     public void onActivate() {
         if (mc.world == null) return;
-
-        clearAll();
-        shouldScan = true;
-        lastCleanup = System.currentTimeMillis();
-
-        if (useMultiThreading.get()) {
-            scannerPool = Executors.newFixedThreadPool(threadCount.get(), r -> {
-                Thread t = new Thread(r, "ChunkFinder-Worker");
-                t.setDaemon(true);
-                t.setPriority(Thread.NORM_PRIORITY - 1);
-                return t;
-            });
-            startInitialScan();
-        } else {
-            startInitialScan();
-        }
+        
+        clearData();
+        isScanning.set(true);
+        
+        currentSessionId = UUID.randomUUID();
+        sessionChunks.put(currentSessionId, ConcurrentHashMap.newKeySet());
+        
+        new Thread(this::scanAllChunks, "ChunkFinder-Scanner").start();
     }
 
     @Override
     public void onDeactivate() {
-        shouldScan = false;
-
-        if (scannerPool != null) {
-            scannerPool.shutdownNow();
-            scannerPool = null;
-        }
-
-        clearAll();
+        isScanning.set(false);
+        clearData();
     }
 
-    private void clearAll() {
-        flaggedChunks.clear();
-        chunkData.clear();
+    private void clearData() {
+        suspiciousChunks.clear();
+        chunkDataMap.clear();
+        totalLoadTime.clear();
         scannedChunks.clear();
-        notificationTimes.clear();
-        recentAlerts.clear();
-        suspiciousBlocks.clear();
-        activeScanCount.set(0);
+        lastScanTime.clear();
+        activeScans.set(0);
+        sessionChunks.clear();
+        currentSessionId = null;
+        entityCounts.clear();
+        
+        holeChunks.clear();
+        chunkQueue.clear();
+        holes1x1.clear();
+        holes3x1.clear();
     }
 
-    @EventHandler
-    private void onTick(TickEvent.Pre event) {
-        if (mc.world == null || mc.player == null) return;
-
-        long now = System.currentTimeMillis();
-
-        while (!recentAlerts.isEmpty() && now - recentAlerts.peek() > 60000) {
-            recentAlerts.poll();
-        }
-
-        if (now - lastCleanup > cleanupInterval.get() * 1000L) {
-            performCleanup();
-            lastCleanup = now;
+    // ============ SCANNING ============
+    private void scanAllChunks() {
+        try {
+            for (Chunk chunk : Utils.chunks()) {
+                if (!isScanning.get() || mc.world == null) break;
+                if (chunk instanceof WorldChunk worldChunk) {
+                    scanChunkIfNeeded(worldChunk);
+                    Thread.sleep(CHUNK_SCAN_DELAY_MS);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     @EventHandler
     private void onChunkLoad(ChunkDataEvent event) {
-        if (!shouldScan || activeScanCount.get() >= maxConcurrentScans.get()) return;
-
-        ChunkPos pos = event.chunk().getPos();
-        if (!scannedChunks.contains(pos)) {
-            scheduleChunkScan(event.chunk());
+        if (!isScanning.get() || mc.world == null) return;
+        if (event.chunk() instanceof WorldChunk worldChunk) {
+            ChunkPos pos = worldChunk.getPos();
+            
+            if (currentSessionId != null) {
+                Set<ChunkPos> session = sessionChunks.get(currentSessionId);
+                if (session != null) session.add(pos);
+            }
+            
+            scanChunkIfNeeded(worldChunk);
         }
     }
 
     @EventHandler
-    private void onBlockUpdate(BlockUpdateEvent event) {
-        if (!shouldScan) return;
+    private void onTick(TickEvent.Post event) {
+        if (mc.world == null || mc.player == null) return;
 
-        BlockPos blockPos = event.pos;
-        if (blockPos.getY() < 0 || blockPos.getY() > 128) return;
-
-        BlockState newState = event.newState;
-        if (isRelevantBlock(newState) || newState.isAir()) {
-            ChunkPos chunkPos = new ChunkPos(blockPos);
-            WorldChunk chunk = (WorldChunk) mc.world.getChunk(chunkPos.x, chunkPos.z);
-            scheduleChunkScan(chunk);
-        }
-    }
-
-    private boolean isRelevantBlock(BlockState state) {
-        Block block = state.getBlock();
-        return
-            block == Blocks.DEEPSLATE ||
-                block == Blocks.COBBLED_DEEPSLATE ||
-                block == Blocks.POLISHED_DEEPSLATE ||
-                block == Blocks.DEEPSLATE_BRICKS ||
-                block == Blocks.DEEPSLATE_TILES ||
-                block == Blocks.CHISELED_DEEPSLATE ||
-                block == Blocks.END_STONE ||
-                block == Blocks.WAXED_COPPER_BLOCK ||
-                block == Blocks.WAXED_OXIDIZED_COPPER ||
-                block == Blocks.TUFF_BRICKS;
-    }
-
-    private void startInitialScan() {
-        Runnable initialScanTask = () -> {
-            try {
-                for (Chunk chunk : Utils.chunks()) {
-                    if (!shouldScan) break;
-                    if (chunk instanceof WorldChunk worldChunk) {
-                        if (activeScanCount.get() < maxConcurrentScans.get()) {
-                            if (useMultiThreading.get() && scannerPool != null) {
-                                scannerPool.submit(() -> analyzeChunk(worldChunk));
-                            } else {
-                                analyzeChunk(worldChunk);
-                            }
-                        }
-                        Thread.sleep(scanInterval.get());
+        // Track session chunks
+        if (currentSessionId != null) {
+            Set<ChunkPos> session = sessionChunks.get(currentSessionId);
+            if (session != null) {
+                for (Chunk chunk : Utils.chunks(true)) {
+                    if (chunk instanceof WorldChunk) {
+                        session.add(chunk.getPos());
                     }
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
-        };
+        }
 
-        if (useMultiThreading.get() && scannerPool != null) {
-            scannerPool.submit(initialScanTask);
-        } else {
-            new Thread(initialScanTask, "ChunkFinder-Initial").start();
+        // Scan entities every 20 ticks (1 second)
+        if (mc.world.getTime() % 20 == 0) {
+            scanEntities();
+        }
+
+        // Process hole ESP chunks
+        if (holeESP.get()) {
+            synchronized (holeChunks) {
+                for (HoleChunk hChunk : holeChunks.values()) hChunk.marked = false;
+
+                for (Chunk chunk : Utils.chunks(true)) {
+                    long key = ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z);
+
+                    if (holeChunks.containsKey(key)) holeChunks.get(key).marked = true;
+                    else if (!chunkQueue.contains(chunk)) {
+                        chunkQueue.add(chunk);
+                    }
+                }
+
+                processHoleChunkQueue();
+                holeChunks.values().removeIf(hChunk -> !hChunk.marked);
+            }
+            removeDistantHoles();
+        }
+
+        // Clean up distant chunks
+        if (mc.world.getTime() % 200 == 0) {
+            cleanupDistantChunks();
         }
     }
 
-    private void scheduleChunkScan(Chunk chunk) {
-        if (!(chunk instanceof WorldChunk worldChunk)) return;
-        if (activeScanCount.get() >= maxConcurrentScans.get()) return;
-
-        Runnable scanTask = () -> {
-            try {
-                Thread.sleep(scanInterval.get() / 2);
-                analyzeChunk(worldChunk);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    private void scanEntities() {
+        if (mc.world == null) return;
+        
+        entityCounts.clear();
+        
+        for (Entity entity : mc.world.getEntities()) {
+            if (entity == null) continue;
+            
+            ChunkPos pos = entity.getChunkPos();
+            EntityCount count = entityCounts.computeIfAbsent(pos, k -> new EntityCount());
+            count.lastUpdate = System.currentTimeMillis();
+            
+            if (entity instanceof TraderLlamaEntity) {
+                count.traderLlamas++;
+            } else if (entity instanceof WanderingTraderEntity) {
+                count.wanderingTraders++;
             }
-        };
-
-        if (useMultiThreading.get() && scannerPool != null) {
-            scannerPool.submit(scanTask);
-        } else {
-            new Thread(scanTask, "ChunkFinder-Scan").start();
+        }
+        
+        for (Map.Entry<ChunkPos, EntityCount> entry : entityCounts.entrySet()) {
+            ChunkPos pos = entry.getKey();
+            EntityCount count = entry.getValue();
+            
+            ChunkAnalysis analysis = chunkDataMap.get(pos);
+            if (analysis == null) {
+                analysis = new ChunkAnalysis();
+                chunkDataMap.put(pos, analysis);
+            }
+            
+            analysis.traderLlamas = count.traderLlamas;
+            analysis.wanderingTraders = count.wanderingTraders;
         }
     }
 
-    private void analyzeChunk(WorldChunk chunk) {
-        if (!shouldScan || chunk == null) return;
-
+    // ============ CHUNK FINDER LOGIC ============
+    private void scanChunkIfNeeded(WorldChunk chunk) {
         ChunkPos pos = chunk.getPos();
-        if (scannedChunks.contains(pos)) return;
-
-        activeScanCount.incrementAndGet();
+        long now = System.currentTimeMillis();
+        
+        Long lastScan = lastScanTime.get(pos);
+        if (lastScan != null && now - lastScan < CLEANUP_INTERVAL_MS && scannedChunks.contains(pos)) return;
+        
+        if (activeScans.get() >= 3) return;
+        
+        activeScans.incrementAndGet();
         try {
-            scannedChunks.add(pos);
-
-            int minY = 0; // Hardcode minimum Y to 0
-            int maxY = Math.min(chunk.getBottomY() + chunk.getHeight(), 128); // Hardcode maximum Y to 128
-
-            ChunkAnalysis analysis = new ChunkAnalysis();
-
-            scanChunkSections(chunk, analysis, minY, maxY);
-
-            chunkData.put(pos, analysis);
-            evaluateChunk(pos, analysis);
+            scanChunk(chunk);
         } finally {
-            activeScanCount.decrementAndGet();
+            activeScans.decrementAndGet();
+            lastScanTime.put(pos, now);
         }
     }
 
-    private void scanChunkSections(WorldChunk chunk, ChunkAnalysis analysis, int minY, int maxY) {
+    private void scanChunk(WorldChunk chunk) {
+        if (!isScanning.get() || mc.world == null) return;
+        
+        ChunkPos pos = chunk.getPos();
+        if (scannedChunks.contains(pos) && !shouldRescan(pos)) return;
+        
+        ChunkAnalysis analysis = new ChunkAnalysis();
         ChunkSection[] sections = chunk.getSectionArray();
-
-        for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
-            if (!shouldScan) return;
-
-            ChunkSection section = sections[sectionIndex];
+        int chunkBottomY = chunk.getBottomY();
+        
+        for (int sectionIdx = 0; sectionIdx < sections.length; sectionIdx++) {
+            if (!isScanning.get()) return;
+            
+            ChunkSection section = sections[sectionIdx];
             if (section == null || section.isEmpty()) continue;
 
-            int sectionY = chunk.getBottomY() + sectionIndex * 16;
-            int startY = Math.max(0, minY - sectionY);
-            int endY = Math.min(15, maxY - sectionY);
-
-            if (startY > 15 || endY < 0) continue;
+            int sectionBaseY = chunkBottomY + sectionIdx * 16;
+            int startY = 0;
+            int endY = 15;
 
             for (int x = 0; x < 16; x++) {
                 for (int z = 0; z < 16; z++) {
                     for (int y = startY; y <= endY; y++) {
-                        if (!shouldScan) return;
-
+                        if (!isScanning.get()) return;
+                        
                         BlockState state = section.getBlockState(x, y, z);
-                        int worldY = sectionY + y;
-                        BlockPos blockPos = new BlockPos(chunk.getPos().getStartX() + x, worldY, chunk.getPos().getStartZ() + z);
+                        if (state.isAir()) continue;
 
-                        analyzeBlock(blockPos, state, worldY, analysis);
+                        int worldY = sectionBaseY + y;
+                        BlockPos blockPos = new BlockPos(
+                            chunk.getPos().getStartX() + x,
+                            worldY,
+                            chunk.getPos().getStartZ() + z
+                        );
+
+                        analyzeBlock(blockPos, state, analysis);
                     }
+                }
+            }
+        }
+
+        EntityCount entityCount = entityCounts.get(pos);
+        if (entityCount != null) {
+            analysis.traderLlamas = entityCount.traderLlamas;
+            analysis.wanderingTraders = entityCount.wanderingTraders;
+        }
+
+        int score = calculateScore(pos, analysis);
+        chunkDataMap.put(pos, analysis);
+        evaluateChunk(pos, score);
+        scannedChunks.add(pos);
+    }
+
+    private boolean shouldRescan(ChunkPos pos) {
+        Long lastScore = lastScanTime.get(pos);
+        if (lastScore == null) return true;
+        return System.currentTimeMillis() - lastScore > 300000;
+    }
+
+    private void analyzeBlock(BlockPos pos, BlockState state, ChunkAnalysis analysis) {
+        Block block = state.getBlock();
+        int y = pos.getY();
+        
+        // Bamboo
+        if (block == Blocks.BAMBOO && y >= BAMBOO_MIN_Y && y <= BAMBOO_MAX_Y) {
+            int height = getPlantHeight(pos, block);
+            if (height >= BAMBOO_HEIGHT_THRESHOLD) {
+                analysis.bambooCount++;
+            }
+        }
+        
+        // Amethyst clusters
+        if (block == Blocks.AMETHYST_CLUSTER && y >= AMETHYST_MIN_Y && y <= AMETHYST_MAX_Y) {
+            analysis.amethystClusters++;
+        }
+        
+        // Long vines
+        if ((block == Blocks.VINE || block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT) &&
+            y >= VINES_MIN_Y && y <= VINES_MAX_Y) {
+            int height = getVineHeight(pos);
+            if (height >= LONG_VINES_THRESHOLD) {
+                analysis.longVines++;
+            }
+        }
+        
+        // Rotated deepslate
+        if (block == Blocks.DEEPSLATE && y <= DEEPSLATE_MAX_Y) {
+            if (state.contains(net.minecraft.state.property.Properties.AXIS)) {
+                var axis = state.get(net.minecraft.state.property.Properties.AXIS);
+                if (axis != Direction.Axis.Y) {
+                    analysis.rotatedDeepslate++;
+                }
+            }
+        }
+        
+        // Spawners
+        if (block == Blocks.SPAWNER && y >= SPAWNER_MIN_Y && y <= SPAWNER_MAX_Y) {
+            analysis.spawners++;
+        }
+        
+        // Beehive with honey level 5
+        if (block == Blocks.BEEHIVE || block == Blocks.BEE_NEST) {
+            if (state.contains(net.minecraft.state.property.Properties.HONEY_LEVEL)) {
+                int honeyLevel = state.get(net.minecraft.state.property.Properties.HONEY_LEVEL);
+                if (honeyLevel == 5) {
+                    analysis.beehivesHoney5++;
                 }
             }
         }
     }
 
-    private void analyzeBlock(BlockPos blockPos, BlockState state, int worldY, ChunkAnalysis analysis) {
-        SuspiciousBlockType blockType = null;
-
-        // Count trial chamber blocks
-        if (ignoreTrialChambers.get() && isTrialChamberBlock(state)) {
-            analysis.trialChamberCount++;
+    private int getPlantHeight(BlockPos pos, Block block) {
+        int height = 1;
+        BlockPos current = pos.down();
+        
+        while (current.getY() >= mc.world.getBottomY()) {
+            BlockState state = mc.world.getBlockState(current);
+            if (state.getBlock() != block) break;
+            height++;
+            current = current.down();
         }
-
-        // If ignoreExposed enabled, detect exposure (air or fluid) around the block
-        boolean exposed = false;
-        if (ignoreExposed.get()) {
-            exposed = isExposedToAirOrFluid(blockPos);
+        
+        current = pos.up();
+        while (current.getY() <= mc.world.getTopYInclusive()) {
+            BlockState state = mc.world.getBlockState(current);
+            if (state.getBlock() != block) break;
+            height++;
+            current = current.up();
         }
-
-        // Detect suspicious blocks
-        if (detectDeepslate.get() && isNormalDeepslate(state) && !exposed && !isInLargeDeepslateLine(blockPos, worldY)) {
-            analysis.deepslateCount++;
-            blockType = SuspiciousBlockType.DEEPSLATE;
-        }
-
-        if (detectRotatedDeepslate.get() && isRotatedDeepslateBlock(state) && !exposed) {
-            analysis.rotatedDeepslateCount++;
-            blockType = SuspiciousBlockType.ROTATED_DEEPSLATE;
-        }
-
-        if (detectCobbledDeepslate.get() && isCobbledDeepslate(state) && !exposed) {
-            analysis.cobbledDeepslateCount++;
-            blockType = SuspiciousBlockType.COBBLED_DEEPSLATE;
-        }
-
-        if (detectEndStone.get() && isEndStone(state) && mc.world.getRegistryKey() != World.END && !exposed) {
-            analysis.endStoneCount++;
-            blockType = SuspiciousBlockType.END_STONE;
-        }
-
-        // Add block to suspicious blocks map if it's suspicious and highlighting enabled
-        if (blockType != null && highlightBlocks.get()) {
-            suspiciousBlocks.put(blockPos, new SuspiciousBlock(blockType, System.currentTimeMillis()));
-        }
+        
+        return height;
     }
 
-    private boolean isValidBlockPos(BlockPos pos) {
-        return pos.getY() >= mc.world.getBottomY() && pos.getY() < mc.world.getHeight();
+    private int getVineHeight(BlockPos pos) {
+        int height = 1;
+        BlockPos current = pos.down();
+        
+        while (current.getY() >= mc.world.getBottomY()) {
+            BlockState state = mc.world.getBlockState(current);
+            if (state.getBlock() != Blocks.VINE && 
+                state.getBlock() != Blocks.CAVE_VINES && 
+                state.getBlock() != Blocks.CAVE_VINES_PLANT) break;
+            height++;
+            current = current.down();
+        }
+        
+        return height;
     }
 
-    private boolean isExposedToAirOrFluid(BlockPos pos) {
-        if (mc.world == null) return false;
-
-        for (Direction dir : Direction.values()) {
-            BlockPos offset = pos.offset(dir);
-            if (!isValidBlockPos(offset)) continue;
-            BlockState neighbor = mc.world.getBlockState(offset);
-            if (neighbor.isAir()) return true;
-
-            FluidState f = neighbor.getFluidState();
-            if (f != null && !f.isEmpty()) return true;
+    private int calculateScore(ChunkPos pos, ChunkAnalysis data) {
+        int score = 0;
+        
+        // Bamboo
+        score += data.bambooCount * 4;
+        
+        // Amethyst clusters - only count if 5 or more
+        if (data.amethystClusters >= AMETHYST_CLUSTER_REQUIRED) {
+            score += data.amethystClusters * AMETHYST_CLUSTER_POINTS;
         }
-        return false;
-    }
-
-    private boolean isInLargeDeepslateLine(BlockPos pos, int worldY) {
-        if (mc.world == null) return false;
-
-        // Adjust threshold based on Y-level: stricter above deepslate layer
-        final int lineThreshold = worldY > -8 ? 50 : 20;
-
-        // Check X-axis
-        int xCount = 1; // Count the current block
-        // Forward (positive X)
-        for (int i = 1; i < lineThreshold; i++) {
-            BlockPos next = pos.offset(Direction.EAST, i);
-            if (!isValidBlockPos(next) || !isNormalDeepslate(mc.world.getBlockState(next))) break;
-            xCount++;
+        
+        // Long vines
+        score += data.longVines * 2;
+        
+        // Rotated deepslate
+        score += data.rotatedDeepslate * ROTATED_DEEPSLATE_POINTS;
+        
+        // Spawners
+        score += data.spawners * SPAWNER_POINTS;
+        
+        // Beehives with honey level 5
+        score += data.beehivesHoney5 * BEEHIVE_HONEY_POINTS;
+        
+        // Trader + Llamas combo
+        if (data.traderLlamas >= TRADER_LLAMA_REQUIRED && data.wanderingTraders >= WANDERING_TRADER_REQUIRED) {
+            score += TRADER_COMBO_POINTS;
         }
-        // Backward (negative X)
-        for (int i = 1; i < lineThreshold; i++) {
-            BlockPos prev = pos.offset(Direction.WEST, i);
-            if (!isValidBlockPos(prev) || !isNormalDeepslate(mc.world.getBlockState(prev))) break;
-            xCount++;
-        }
-        if (xCount >= lineThreshold) return true;
-
-        // Check Z-axis
-        int zCount = 1;
-        // Forward (positive Z)
-        for (int i = 1; i < lineThreshold; i++) {
-            BlockPos next = pos.offset(Direction.SOUTH, i);
-            if (!isValidBlockPos(next) || !isNormalDeepslate(mc.world.getBlockState(next))) break;
-            zCount++;
-        }
-        // Backward (negative Z)
-        for (int i = 1; i < lineThreshold; i++) {
-            BlockPos prev = pos.offset(Direction.NORTH, i);
-            if (!isValidBlockPos(prev) || !isNormalDeepslate(mc.world.getBlockState(prev))) break;
-            zCount++;
-        }
-        if (zCount >= lineThreshold) return true;
-
-        // Skip Y-axis check in deepslate levels (Y <= 0) to avoid over-filtering
-        if (worldY > 0) {
-            int yCount = 1;
-            // Up (positive Y)
-            for (int i = 1; i < lineThreshold; i++) {
-                BlockPos up = pos.offset(Direction.UP, i);
-                if (!isValidBlockPos(up) || !isNormalDeepslate(mc.world.getBlockState(up))) break;
-                yCount++;
+        
+        // Chunk uptime bonuses
+        Long totalTime = totalLoadTime.get(pos);
+        if (totalTime != null && totalTime >= 600000) score += 5; // 10 minutes
+        
+        if (sessionChunks.size() >= 2) {
+            int sessionsSeen = 0;
+            for (Set<ChunkPos> session : sessionChunks.values()) {
+                if (session.contains(pos)) sessionsSeen++;
             }
-            // Down (negative Y)
-            for (int i = 1; i < lineThreshold; i++) {
-                BlockPos down = pos.offset(Direction.DOWN, i);
-                if (!isValidBlockPos(down) || !isNormalDeepslate(mc.world.getBlockState(down))) break;
-                yCount++;
-            }
-            if (yCount >= lineThreshold) return true;
+            if (sessionsSeen >= 2) score += 10;
         }
-
-        return false;
+        
+        Long totalLoad = totalLoadTime.get(pos);
+        if (totalLoad != null && totalLoad >= 1800000) score += 20; // 30 minutes
+        
+        return score;
     }
 
-    private void evaluateChunk(ChunkPos pos, ChunkAnalysis analysis) {
-        // Check for trial chamber
-        if (ignoreTrialChambers.get() && analysis.trialChamberCount >= trialChamberThreshold.get()) {
-            if (trialChamberAlerts.get() && mc.player != null) {
-                String message = String.format("ChunkFinder [%d, %d] - Trial chamber detected - Copper/Tuff blocks: %d",
-                    pos.x, pos.z, analysis.trialChamberCount);
-                notifyTrialChamber(message);
-            }
-            flaggedChunks.remove(pos);
-            notificationTimes.remove(pos);
-            return;
-        }
-
-        boolean suspicious = false;
-        StringBuilder reasons = new StringBuilder();
-
-        if (detectDeepslate.get() && analysis.deepslateCount >= deepslateThreshold.get()) {
-            suspicious = true;
-            reasons.append("Deepslate[").append(analysis.deepslateCount).append("] ");
-        }
-
-        if (detectCobbledDeepslate.get() && analysis.cobbledDeepslateCount >= cobbledDeepslateThreshold.get()) {
-            suspicious = true;
-            reasons.append("CobbledDeepslate[").append(analysis.cobbledDeepslateCount).append("] ");
-        }
-
-        if (detectRotatedDeepslate.get() && analysis.rotatedDeepslateCount >= rotatedDeepslateThreshold.get()) {
-            suspicious = true;
-            reasons.append("RotatedDeepslate[").append(analysis.rotatedDeepslateCount).append("] ");
-        }
-
-        if (detectEndStone.get() && analysis.endStoneCount >= endStoneThreshold.get()) {
-            suspicious = true;
-            reasons.append("EndStone[").append(analysis.endStoneCount).append("] ");
-        }
-
-        if (suspicious) {
-            if (flaggedChunks.add(pos)) {
-                notifyChunkFound(pos, reasons.toString().trim());
+    private void evaluateChunk(ChunkPos pos, int score) {
+        lastScanTime.put(pos, System.currentTimeMillis());
+        
+        ChunkAnalysis data = chunkDataMap.get(pos);
+        boolean hasSpawners = data != null && data.spawners > 0;
+        boolean hasTraderCombo = data != null && 
+            data.traderLlamas >= TRADER_LLAMA_REQUIRED && 
+            data.wanderingTraders >= WANDERING_TRADER_REQUIRED;
+        
+        if (score >= SUSPICION_THRESHOLD || hasSpawners || hasTraderCombo) {
+            if (suspiciousChunks.add(pos)) {
+                String reason;
+                if (hasSpawners) {
+                    reason = "Spawner detected!";
+                } else if (hasTraderCombo) {
+                    reason = "Trader + Llamas detected!";
+                } else {
+                    reason = String.format("Score: %d", score);
+                }
+                
+                mc.execute(() -> {
+                    mc.getToastManager().add(new MeteorToast(Items.COMPASS, "Chunk Finder", 
+                        String.format("Suspicious chunk [%d, %d] - %s", pos.x, pos.z, reason)));
+                    
+                    mc.getSoundManager().play(PositionedSoundInstance.master(
+                        SoundEvents.BLOCK_NOTE_BLOCK_BELL.value(), 1.0f, 1.5f));
+                });
             }
         } else {
-            flaggedChunks.remove(pos);
-            notificationTimes.remove(pos);
+            suspiciousChunks.remove(pos);
         }
     }
 
-    private boolean isNormalDeepslate(BlockState state) {
-        Block block = state.getBlock();
-        if (block != Blocks.DEEPSLATE || !state.contains(Properties.AXIS)) return false;
-        Direction.Axis axis = state.get(Properties.AXIS);
-        return axis == Direction.Axis.Y;
+    // ============ HOLE ESP LOGIC ============
+    private void processHoleChunkQueue() {
+        int processed = 0;
+        while (!chunkQueue.isEmpty() && processed < CHUNKS_PER_TICK) { // Fixed at 8
+            Chunk chunk = chunkQueue.poll();
+            if (chunk != null) {
+                HoleChunk hChunk = new HoleChunk(chunk.getPos().x, chunk.getPos().z);
+                holeChunks.put(hChunk.getKey(), hChunk);
+                MeteorExecutor.execute(() -> searchHoleChunk(chunk));
+                processed++;
+            }
+        }
     }
 
-    private boolean isCobbledDeepslate(BlockState state) {
-        return state.getBlock() == Blocks.COBBLED_DEEPSLATE;
-    }
+    private void searchHoleChunk(Chunk chunk) {
+        if (!holeESP.get() || mc.world == null) return;
+        
+        ChunkSection[] sections = chunk.getSectionArray();
+        int chunkBottomY = chunk.getBottomY();
+        
+        for (int sectionIdx = 0; sectionIdx < sections.length; sectionIdx++) {
+            ChunkSection section = sections[sectionIdx];
+            if (section == null || section.isEmpty()) continue;
 
-    private boolean isRotatedDeepslateBlock(BlockState state) {
-        Block block = state.getBlock();
-        if (block != Blocks.DEEPSLATE || !state.contains(Properties.AXIS)) return false;
-        Direction.Axis axis = state.get(Properties.AXIS);
-        return axis != Direction.Axis.Y;
-    }
+            int sectionBaseY = chunkBottomY + sectionIdx * 16;
 
-    private boolean isEndStone(BlockState state) {
-        return state.getBlock() == Blocks.END_STONE;
-    }
-
-    private boolean isTrialChamberBlock(BlockState state) {
-        Block block = state.getBlock();
-        return block == Blocks.WAXED_COPPER_BLOCK ||
-            block == Blocks.WAXED_OXIDIZED_COPPER ||
-            block == Blocks.TUFF_BRICKS;
-    }
-
-    private void notifyChunkFound(ChunkPos pos, String details) {
-        long now = System.currentTimeMillis();
-
-        if (recentAlerts.size() >= maxAlerts.get()) return;
-
-        Long lastNotification = notificationTimes.get(pos);
-        if (lastNotification != null && now - lastNotification < 45000) return;
-
-        String message = String.format("ChunkFinder [%d, %d] - Suspicious chunk detected - %s", pos.x, pos.z, details);
-
-        mc.execute(() -> {
-            switch (notificationMode.get()) {
-                case Chat -> {
-                    if (chatAlerts.get() && mc.player != null) {
-                        mc.player.sendMessage(Text.literal(message), false);
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int y = 0; y < 16; y++) {
+                        BlockPos pos = chunk.getPos().getBlockPos(x, sectionBaseY + y, z);
+                        if (isPassableBlock(pos)) {
+                            check1x1Hole(pos);
+                            check3x1Hole(pos);
+                        }
                     }
                 }
-                case Toast -> {
-                    mc.getToastManager().add(new MeteorToast(Items.CHEST, "ChunkFinder", message));
-                }
-                case Both -> {
-                    if (chatAlerts.get() && mc.player != null) {
-                        mc.player.sendMessage(Text.literal(message), false);
-                    }
-                    mc.getToastManager().add(new MeteorToast(Items.CHEST, "ChunkFinder", message));
+            }
+        }
+    }
+
+    private void check1x1Hole(BlockPos pos) {
+        if (isValidHoleSection(pos)) {
+            BlockPos.Mutable currentPos = pos.mutableCopy();
+            while (isValidHoleSection(currentPos)) {
+                currentPos.move(Direction.UP);
+            }
+            if (currentPos.getY() - pos.getY() >= MIN_HOLE_DEPTH) {
+                Box holeBox = new Box(
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    pos.getX() + 1, currentPos.getY(), pos.getZ() + 1
+                );
+                if (!holes1x1.contains(holeBox) && holes1x1.stream().noneMatch(existing -> existing.intersects(holeBox))) {
+                    holes1x1.add(holeBox);
                 }
             }
+        }
+    }
 
-            if (playSound.get()) {
-                mc.getSoundManager().play(PositionedSoundInstance.master(
-                    SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f));
+    private void check3x1Hole(BlockPos pos) {
+        if (isValid3x1HoleSectionX(pos)) {
+            BlockPos.Mutable currentPos = pos.mutableCopy();
+            while (isValid3x1HoleSectionX(currentPos)) {
+                currentPos.move(Direction.UP);
             }
+            if (currentPos.getY() - pos.getY() >= MIN_HOLE_DEPTH) {
+                Box holeBox = new Box(
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    pos.getX() + 3, currentPos.getY(), pos.getZ() + 1
+                );
+                if (!holes3x1.contains(holeBox) && holes3x1.stream().noneMatch(existing -> existing.intersects(holeBox))) {
+                    holes3x1.add(holeBox);
+                }
+            }
+        }
 
-            recentAlerts.offer(now);
-            notificationTimes.put(pos, now);
+        if (isValid3x1HoleSectionZ(pos)) {
+            BlockPos.Mutable currentPos = pos.mutableCopy();
+            while (isValid3x1HoleSectionZ(currentPos)) {
+                currentPos.move(Direction.UP);
+            }
+            if (currentPos.getY() - pos.getY() >= MIN_HOLE_DEPTH) {
+                Box holeBox = new Box(
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    pos.getX() + 1, currentPos.getY(), pos.getZ() + 3
+                );
+                if (!holes3x1.contains(holeBox) && holes3x1.stream().noneMatch(existing -> existing.intersects(holeBox))) {
+                    holes3x1.add(holeBox);
+                }
+            }
+        }
+    }
+
+    private boolean isValidHoleSection(BlockPos pos) {
+        return isPassableBlock(pos) && 
+               !isPassableBlock(pos.north()) && 
+               !isPassableBlock(pos.south()) && 
+               !isPassableBlock(pos.east()) && 
+               !isPassableBlock(pos.west());
+    }
+
+    private boolean isValid3x1HoleSectionX(BlockPos pos) {
+        return isPassableBlock(pos) &&
+            isPassableBlock(pos.east()) &&
+            isPassableBlock(pos.east(2)) &&
+            !isPassableBlock(pos.north()) &&
+            !isPassableBlock(pos.south()) &&
+            !isPassableBlock(pos.east(3)) &&
+            !isPassableBlock(pos.west()) &&
+            !isPassableBlock(pos.east().north()) &&
+            !isPassableBlock(pos.east().south()) &&
+            !isPassableBlock(pos.east(2).north()) &&
+            !isPassableBlock(pos.east(2).south());
+    }
+
+    private boolean isValid3x1HoleSectionZ(BlockPos pos) {
+        return isPassableBlock(pos) &&
+            isPassableBlock(pos.south()) &&
+            isPassableBlock(pos.south(2)) &&
+            !isPassableBlock(pos.east()) &&
+            !isPassableBlock(pos.west()) &&
+            !isPassableBlock(pos.south(3)) &&
+            !isPassableBlock(pos.north()) &&
+            !isPassableBlock(pos.south().east()) &&
+            !isPassableBlock(pos.south().west()) &&
+            !isPassableBlock(pos.south(2).east()) &&
+            !isPassableBlock(pos.south(2).west());
+    }
+
+    private boolean isPassableBlock(BlockPos pos) {
+        BlockState state = mc.world.getBlockState(pos);
+        VoxelShape shape = state.getCollisionShape(mc.world, pos);
+        return shape.isEmpty() || !VoxelShapes.fullCube().equals(shape);
+    }
+
+    private void removeDistantHoles() {
+        Set<WorldChunk> loadedChunks = new HashSet<>();
+        for (Chunk chunk : Utils.chunks(true)) {
+            if (chunk instanceof WorldChunk) {
+                loadedChunks.add((WorldChunk) chunk);
+            }
+        }
+
+        holes1x1.removeIf(box -> {
+            BlockPos pos = new BlockPos((int)box.minX, (int)box.minY, (int)box.minZ);
+            return !loadedChunks.contains(mc.world.getChunk(pos));
+        });
+
+        holes3x1.removeIf(box -> {
+            BlockPos pos = new BlockPos((int)box.minX, (int)box.minY, (int)box.minZ);
+            return !loadedChunks.contains(mc.world.getChunk(pos));
         });
     }
 
-    private void notifyTrialChamber(String message) {
-        long now = System.currentTimeMillis();
-
-        if (recentAlerts.size() >= maxAlerts.get()) return;
-
-        String[] parts = message.split(" - ", 2);
-        String coordsPart = parts[0].replace("ChunkFinder ", "");
-        String detailsPart = parts.length > 1 ? parts[1] : "";
-
-        mc.execute(() -> {
-            switch (notificationMode.get()) {
-                case Chat -> {
-                    if (trialChamberAlerts.get() && mc.player != null) {
-                        mc.player.sendMessage(Text.literal(message), false);
-                    }
-                }
-                case Toast -> {
-                    mc.getToastManager().add(new MeteorToast(Items.CHEST, "ChunkFinder", String.format("%s - %s", coordsPart, detailsPart)));
-                }
-                case Both -> {
-                    if (trialChamberAlerts.get() && mc.player != null) {
-                        mc.player.sendMessage(Text.literal(message), false);
-                    }
-                    mc.getToastManager().add(new MeteorToast(Items.CHEST, "ChunkFinder", String.format("%s - %s", coordsPart, detailsPart)));
-                }
-            }
-
-            if (playSound.get()) {
-                mc.getSoundManager().play(PositionedSoundInstance.master(
-                    SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f));
-            }
-
-            recentAlerts.offer(now);
-        });
-    }
-
-    private void performCleanup() {
+    // ============ CLEANUP ============
+    private void cleanupDistantChunks() {
         if (mc.player == null) return;
 
-        int viewDist = mc.options.getViewDistance().getValue();
-        int playerChunkX = (int) mc.player.getX() / 16;
-        int playerChunkZ = (int) mc.player.getZ() / 16;
+        int playerX = (int) mc.player.getX() >> 4;
+        int playerZ = (int) mc.player.getZ() >> 4;
 
-        flaggedChunks.removeIf(pos -> {
-            int dx = Math.abs(pos.x - playerChunkX);
-            int dz = Math.abs(pos.z - playerChunkZ);
-            boolean tooFar = dx > viewDist + 5 || dz > viewDist + 5;
-
-            if (tooFar) {
-                chunkData.remove(pos);
-                notificationTimes.remove(pos);
-            }
-            return tooFar;
+        suspiciousChunks.removeIf(pos -> {
+            int dx = Math.abs(pos.x - playerX);
+            int dz = Math.abs(pos.z - playerZ);
+            return dx > MAX_RENDER_DISTANCE || dz > MAX_RENDER_DISTANCE;
         });
 
         scannedChunks.removeIf(pos -> {
-            int dx = Math.abs(pos.x - playerChunkX);
-            int dz = Math.abs(pos.z - playerChunkZ);
-            return dx > viewDist + 3 || dz > viewDist + 3;
+            int dx = Math.abs(pos.x - playerX);
+            int dz = Math.abs(pos.z - playerZ);
+            return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
         });
 
-        suspiciousBlocks.entrySet().removeIf(entry -> {
-            BlockPos blockPos = entry.getKey();
-            double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(blockPos));
-            return distance > viewDist * 16 + 80;
+        chunkDataMap.entrySet().removeIf(entry -> {
+            int dx = Math.abs(entry.getKey().x - playerX);
+            int dz = Math.abs(entry.getKey().z - playerZ);
+            return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
+        });
+        
+        totalLoadTime.entrySet().removeIf(entry -> {
+            int dx = Math.abs(entry.getKey().x - playerX);
+            int dz = Math.abs(entry.getKey().z - playerZ);
+            return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
+        });
+        
+        entityCounts.entrySet().removeIf(entry -> {
+            int dx = Math.abs(entry.getKey().x - playerX);
+            int dz = Math.abs(entry.getKey().z - playerZ);
+            return dx > MAX_RENDER_DISTANCE + 10 || dz > MAX_RENDER_DISTANCE + 10;
         });
     }
 
+    // ============ RENDERING ============
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.player == null) return;
+        if (mc.player == null || !isActive()) return;
 
-        // Render chunk highlights
-        if (!flaggedChunks.isEmpty()) {
-            Color highlight = new Color(chunkColor.get());
-            int rendered = 0;
-            for (ChunkPos pos : flaggedChunks) {
-                if (rendered++ > 50) break;
-                renderChunkHighlight(event, pos, highlight);
+        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        Vec3d playerPos = mc.player.getPos();
+
+        // Render tracers first (so they appear behind chunks)
+        if (chunkTracer.get() && !suspiciousChunks.isEmpty()) {
+            for (ChunkPos pos : suspiciousChunks) {
+                // Calculate chunk center position
+                double chunkCenterX = pos.getStartX() + 8;
+                double chunkCenterZ = pos.getStartZ() + 8;
+                double tracerY = tracerHeight.get();
+                
+                // Draw tracer from player to chunk
+                event.renderer.line(
+                    playerPos.x, playerPos.y + 1, playerPos.z,
+                    chunkCenterX, tracerY, chunkCenterZ,
+                    TRACER_COLOR
+                );
             }
         }
 
-        // Render individual suspicious blocks
-        if (highlightBlocks.get()) {
-            renderSuspiciousBlocks(event);
+        // Render suspicious chunks
+        if (!suspiciousChunks.isEmpty()) {
+            int rendered = 0;
+            for (ChunkPos pos : suspiciousChunks) {
+                if (rendered++ >= MAX_RENDER_DISTANCE) break;
+                renderChunkHighlight(event.renderer, pos);
+            }
+        }
+
+        // Render holes if enabled
+        if (holeESP.get()) {
+            renderHoles(event.renderer);
         }
     }
 
-    private void renderChunkHighlight(Render3DEvent event, ChunkPos pos, Color color) {
+    private void renderChunkHighlight(Renderer3D renderer, ChunkPos pos) {
         int startX = pos.getStartX();
         int startZ = pos.getStartZ();
         int endX = pos.getEndX();
         int endZ = pos.getEndZ();
-
-        double y = renderY.get();
-        double h = thickness.get();
-
-        Box box = new Box(startX, y, startZ, endX + 1, y + h, endZ + 1);
-        event.renderer.box(box, color, color, renderMode.get(), 0);
+        
+        double y = 60; // Fixed render height
+        
+        Box fillBox = new Box(startX, y, startZ, endX + 1, y + 0.1, endZ + 1);
+        renderer.box(fillBox, CHUNK_COLOR, CHUNK_COLOR, ShapeMode.Both, 0);
+        
+        Box outlineBox = new Box(startX, y, startZ, endX + 1, y + 0.1, endZ + 1);
+        renderer.box(outlineBox, CHUNK_OUTLINE_COLOR, CHUNK_OUTLINE_COLOR, ShapeMode.Lines, 0);
     }
 
-    private void renderSuspiciousBlocks(Render3DEvent event) {
-        int rendered = 0;
-
-        for (Map.Entry<BlockPos, SuspiciousBlock> entry : suspiciousBlocks.entrySet()) {
-            if (rendered >= maxBlocksToRender.get()) break;
-
-            BlockPos pos = entry.getKey();
-            SuspiciousBlock suspiciousBlock = entry.getValue();
-
-            double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(pos));
-            if (distance > mc.options.getViewDistance().getValue() * 16) continue;
-
-            Color blockColor = getColorForBlockType(suspiciousBlock.type);
-            if (blockColor != null) {
-                Box box = new Box(pos);
-                event.renderer.box(box, blockColor, blockColor, blockRenderMode.get(), 0);
-                rendered++;
-            }
+    private void renderHoles(Renderer3D renderer) {
+        for (Box box : holes1x1) {
+            renderer.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+                HOLE_1X1_SIDE, HOLE_1X1_LINE, ShapeMode.Both, 0);
         }
-    }
-
-    private Color getColorForBlockType(SuspiciousBlockType type) {
-        return switch (type) {
-            case DEEPSLATE -> new Color(deepslateBlockColor.get());
-            case COBBLED_DEEPSLATE -> new Color(cobbledDeepslateBlockColor.get());
-            case ROTATED_DEEPSLATE -> new Color(rotatedDeepslateBlockColor.get());
-            case END_STONE -> new Color(endStoneBlockColor.get());
-            default -> null;
-        };
+        
+        for (Box box : holes3x1) {
+            renderer.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+                HOLE_3X1_SIDE, HOLE_3X1_LINE, ShapeMode.Both, 0);
+        }
     }
 
     @Override
     public String getInfoString() {
-        if (highlightBlocks.get()) {
-            return String.format("C:%d B:%d", flaggedChunks.size(), suspiciousBlocks.size());
-        }
-        return String.valueOf(flaggedChunks.size());
-    }
-
-    private static class ChunkAnalysis {
-        int deepslateCount = 0;
-        int cobbledDeepslateCount = 0;
-        int rotatedDeepslateCount = 0;
-        int endStoneCount = 0;
-        int trialChamberCount = 0;
-    }
-
-    private static class SuspiciousBlock {
-        final SuspiciousBlockType type;
-        final long detectedTime;
-
-        SuspiciousBlock(SuspiciousBlockType type, long detectedTime) {
-            this.type = type;
-            this.detectedTime = detectedTime;
-        }
-    }
-
-    private enum SuspiciousBlockType {
-        DEEPSLATE,
-        COBBLED_DEEPSLATE,
-        ROTATED_DEEPSLATE,
-        END_STONE
+        return String.format("%d chunks | %d holes", suspiciousChunks.size(), holes1x1.size() + holes3x1.size());
     }
 }
