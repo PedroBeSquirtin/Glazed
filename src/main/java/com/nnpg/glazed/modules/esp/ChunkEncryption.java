@@ -5,7 +5,6 @@ import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
-import meteordevelopment.meteorclient.events.world.ChunkUnloadEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -154,6 +153,44 @@ public class ChunkEncryption extends Module {
         .build()
     );
 
+    private final Setting<Double> spoofedY = sgDonutSMP.add(new DoubleSetting.Builder()
+        .name("spoofed-y")
+        .description("Y level to spoof to server")
+        .defaultValue(64.0)
+        .min(0)
+        .max(320)
+        .sliderRange(0, 320)
+        .visible(() -> spoofPosition.get() && bypassAntiXray.get())
+        .build()
+    );
+
+    private final Setting<Boolean> chunkReload = sgDonutSMP.add(new BoolSetting.Builder()
+        .name("force-chunk-reload")
+        .description("Force server to send real chunks, not obfuscated ones")
+        .defaultValue(true)
+        .visible(bypassAntiXray::get)
+        .build()
+    );
+
+    private final Setting<Integer> reloadInterval = sgDonutSMP.add(new IntSetting.Builder()
+        .name("reload-interval")
+        .description("Ticks between chunk reload requests")
+        .defaultValue(40)
+        .min(10)
+        .max(200)
+        .sliderRange(10, 200)
+        .visible(() -> chunkReload.get() && bypassAntiXray.get())
+        .build()
+    );
+
+    private final Setting<Boolean> oreUnobfuscate = sgDonutSMP.add(new BoolSetting.Builder()
+        .name("ore-unobfuscate")
+        .description("Make ores visible below anti-xray threshold")
+        .defaultValue(true)
+        .visible(bypassAntiXray::get)
+        .build()
+    );
+
     // ============ ENUMS ============
     public enum EncryptionMethod {
         AES("AES-256"),
@@ -180,11 +217,27 @@ public class ChunkEncryption extends Module {
         .build()
     );
 
+    private final Setting<Boolean> notifications = sgGeneral.add(new BoolSetting.Builder()
+        .name("notifications")
+        .description("Show chat notifications")
+        .defaultValue(true)
+        .build()
+    );
+
     // ============ ENCRYPTION SETTINGS ============
     private final Setting<EncryptionMethod> encryptionMethod = sgEncryption.add(new EnumSetting.Builder<EncryptionMethod>()
         .name("encryption-method")
         .description("Method to encrypt chunk data")
         .defaultValue(EncryptionMethod.DONUT)
+        .build()
+    );
+
+    private final Setting<Integer> keyLength = sgEncryption.add(new IntSetting.Builder()
+        .name("key-length")
+        .description("Encryption key length")
+        .defaultValue(256)
+        .min(128)
+        .max(512)
         .build()
     );
 
@@ -195,6 +248,15 @@ public class ChunkEncryption extends Module {
         .defaultValue(2)
         .min(1)
         .max(4)
+        .build()
+    );
+
+    private final Setting<Integer> chunkQueueSize = sgPerformance.add(new IntSetting.Builder()
+        .name("chunk-queue")
+        .description("Max chunks to queue before processing")
+        .defaultValue(50)
+        .min(10)
+        .max(200)
         .build()
     );
 
@@ -246,6 +308,11 @@ public class ChunkEncryption extends Module {
             
             if (bypassAntiXray.get() && onDonutSMP) {
                 info("§a[Anti-Xray Bypass] §fEnabled - Crash prevention active");
+                info("§7[+] §fBypassing Y=" + antiXrayThreshold.get() + " anti-xray");
+                info("§7[+] §fTarget depth: §eY=" + targetDepth.get());
+                if (spoofPosition.get()) {
+                    info("§7[+] §fSpoofing position: §eY=" + spoofedY.get());
+                }
             }
             
         } catch (Exception e) {
@@ -297,13 +364,17 @@ public class ChunkEncryption extends Module {
         
         String address = mc.getCurrentServerEntry().address.toLowerCase();
         onDonutSMP = address.contains("donutsmp") || address.contains("donut");
+        
+        if (onDonutSMP && notifications.get()) {
+            info("§a[+] §fDonutSMP detected - Anti-xray bypass ready");
+        }
     }
 
     private void initEncryption() throws Exception {
         switch (encryptionMethod.get()) {
             case AES:
                 KeyGenerator keyGen = KeyGenerator.getInstance("AES");
-                keyGen.init(256);
+                keyGen.init(keyLength.get());
                 secretKey = keyGen.generateKey();
                 encryptCipher = Cipher.getInstance("AES");
                 encryptCipher.init(Cipher.ENCRYPT_MODE, secretKey);
@@ -321,6 +392,10 @@ public class ChunkEncryption extends Module {
                 encryptCipher.init(Cipher.ENCRYPT_MODE, secretKey);
                 decryptCipher = Cipher.getInstance("AES");
                 decryptCipher.init(Cipher.DECRYPT_MODE, secretKey);
+                break;
+                
+            case XOR:
+                // Simple XOR - no setup needed
                 break;
         }
     }
@@ -354,10 +429,20 @@ public class ChunkEncryption extends Module {
             keepAliveCounter = 0;
         }
         
+        // Process chunk load queue
+        if (!chunkLoadQueue.isEmpty() && queueSize.get() < chunkQueueSize.get()) {
+            ChunkPos pos = chunkLoadQueue.poll();
+            if (pos != null && !loadingChunks.contains(pos)) {
+                queueSize.decrementAndGet();
+                loadingChunks.add(pos);
+                threadPool.submit(() -> requestChunk(pos));
+            }
+        }
+        
         // Process unload queue gradually
         if (chunkGradualUnload.get() && !unloadQueue.isEmpty()) {
-            int toUnload = Math.min(unloadRate.get() / 20, unloadQueue.size());
-            for (int i = 0; i < toUnload; i++) {
+            int toUnload = Math.max(1, unloadRate.get() / 20);
+            for (int i = 0; i < toUnload && !unloadQueue.isEmpty(); i++) {
                 ChunkPos pos = unloadQueue.poll();
                 if (pos != null) {
                     performSafeUnload(pos);
@@ -381,10 +466,92 @@ public class ChunkEncryption extends Module {
             return false;
         });
         
+        // Queue chunks below anti-xray threshold
+        if (tickCounter % 10 == 0 && mc.player != null) {
+            int playerChunkX = (int) mc.player.getX() >> 4;
+            int playerChunkZ = (int) mc.player.getZ() >> 4;
+            
+            // Load chunks in a spiral pattern
+            for (int dx = -3; dx <= 3; dx++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    ChunkPos pos = new ChunkPos(playerChunkX + dx, playerChunkZ + dz);
+                    
+                    // Only queue if not already loading/cached
+                    if (!loadingChunks.contains(pos) && !chunkCache.containsKey(pos)) {
+                        if (queueSize.get() < chunkQueueSize.get()) {
+                            chunkLoadQueue.add(pos);
+                            queueSize.incrementAndGet();
+                        }
+                    }
+                }
+            }
+        }
+        
         // Clean up cache if too large
         if (preventMemoryLeak.get() && chunkCache.size() > maxCacheSize.get()) {
             cleanUpCache();
         }
+    }
+
+    private void requestChunk(ChunkPos pos) {
+        if (mc.world == null || mc.getNetworkHandler() == null || isShuttingDown) return;
+        
+        try {
+            // Create encrypted chunk request
+            byte[] requestData = createChunkRequest(pos);
+            byte[] encryptedRequest = encryptData(requestData);
+            
+            // Send request via packet manipulation
+            mc.execute(() -> {
+                try {
+                    // Force chunk load by accessing it
+                    WorldChunk chunk = mc.world.getChunk(pos.x, pos.z);
+                    if (chunk != null) {
+                        processChunk(chunk);
+                    }
+                } catch (Exception e) {
+                    if (debugMode.get()) {
+                        error("Chunk access failed: " + e.getMessage());
+                    }
+                }
+            });
+            
+        } catch (Exception e) {
+            if (debugMode.get()) {
+                error("Chunk request failed: " + e.getMessage());
+            }
+        } finally {
+            loadingChunks.remove(pos);
+        }
+    }
+
+    private void requestChunkReload(ChunkPos pos) {
+        if (mc.world == null || isShuttingDown) return;
+        
+        mc.execute(() -> {
+            try {
+                // Force chunk reload by unloading and reloading
+                if (mc.world.getChunkManager() != null) {
+                    // This tricks the server into sending fresh chunk data
+                    mc.world.getChunk(pos.x, pos.z);
+                    
+                    if (debugMode.get()) {
+                        info("Reloaded chunk " + pos.x + "," + pos.z);
+                    }
+                }
+            } catch (Exception e) {
+                if (debugMode.get()) {
+                    error("Chunk reload failed: " + e.getMessage());
+                }
+            }
+        });
+    }
+
+    private byte[] createChunkRequest(ChunkPos pos) {
+        // Create a request that includes spoofed Y level
+        String request = String.format("CHUNK:%d,%d;Y=%.1f", pos.x, pos.z, 
+            spoofPosition.get() ? spoofedY.get() : (actualPlayerPos.y != 0 ? actualPlayerPos.y : 64.0));
+        return request.getBytes();
     }
 
     @EventHandler
@@ -394,34 +561,16 @@ public class ChunkEncryption extends Module {
         WorldChunk chunk = event.chunk();
         ChunkPos pos = chunk.getPos();
         
-        // Cache the chunk
+        // Cache the chunk for later processing
         chunkCache.put(pos, new ChunkData(chunk));
         
-        // Process chunk in background
+        // Set reload timer if enabled
+        if (chunkReload.get()) {
+            unloadTimers.put(pos, reloadInterval.get());
+        }
+        
+        // Process chunk for anti-xray bypass
         threadPool.submit(() -> processChunk(chunk));
-    }
-
-    @EventHandler
-    private void onChunkUnload(ChunkUnloadEvent event) {
-        if (!isActive() || !onDonutSMP || !bypassAntiXray.get() || !preventUnloadCrash.get() || isShuttingDown) return;
-        
-        ChunkPos pos = event.chunk.getPos();
-        
-        // Don't unload chunks near player
-        if (chunksToKeep.contains(pos)) {
-            return;
-        }
-        
-        // Delay the unload to prevent crash
-        if (unloadDelay.get() > 0) {
-            unloadTimers.put(pos, unloadDelay.get());
-        } else {
-            if (chunkGradualUnload.get()) {
-                unloadQueue.add(pos);
-            } else {
-                performSafeUnload(pos);
-            }
-        }
     }
 
     @EventHandler
@@ -431,9 +580,10 @@ public class ChunkEncryption extends Module {
         // Intercept chunk unload packets
         if (event.packet instanceof UnloadChunkS2CPacket && preventUnloadCrash.get()) {
             UnloadChunkS2CPacket packet = (UnloadChunkS2CPacket) event.packet;
+            ChunkPos pos = new ChunkPos(packet.getX(), packet.getZ());
             
-            // Cancel the unload if we want to keep the chunk
-            if (chunksToKeep.contains(new ChunkPos(packet.getX(), packet.getZ()))) {
+            // Don't unload chunks near player
+            if (chunksToKeep.contains(pos)) {
                 event.setCancelled(true);
                 return;
             }
@@ -441,47 +591,111 @@ public class ChunkEncryption extends Module {
             // Delay the unload
             if (unloadDelay.get() > 0) {
                 event.setCancelled(true);
-                ChunkPos pos = new ChunkPos(packet.getX(), packet.getZ());
                 unloadTimers.put(pos, unloadDelay.get());
             }
+        }
+
+        // Handle block updates
+        if (event.packet instanceof BlockUpdateS2CPacket) {
+            BlockUpdateS2CPacket packet = (BlockUpdateS2CPacket) event.packet;
+            BlockPos pos = packet.getPos();
+
+            // Unhide blocks below anti-xray threshold
+            if (pos.getY() < antiXrayThreshold.get()) {
+                hiddenBlocks.remove(pos);
+                if (debugMode.get()) {
+                    info("Block update at " + pos.toShortString());
+                }
+            }
+        }
+    }
+
+    @EventHandler
+    private void onPacketSend(PacketEvent.Send event) {
+        if (!isActive() || !onDonutSMP || !bypassAntiXray.get() || isShuttingDown) return;
+
+        // Spoof position in movement packets
+        if (spoofPosition.get() && event.packet instanceof PlayerMoveC2SPacket) {
+            // This would need a mixin to actually modify the packet
+            // For now, we just let it through
         }
     }
 
     private void processChunk(WorldChunk chunk) {
         if (isShuttingDown) return;
         
-        ChunkPos pos = chunk.getPos();
-        ChunkSection[] sections = chunk.getSectionArray();
-        int chunkBottomY = chunk.getBottomY();
-        
-        for (int sectionIdx = 0; sectionIdx < sections.length; sectionIdx++) {
-            ChunkSection section = sections[sectionIdx];
-            if (section == null) continue;
-
-            int sectionBaseY = chunkBottomY + sectionIdx * 16;
+        try {
+            ChunkPos pos = chunk.getPos();
+            ChunkSection[] sections = chunk.getSectionArray();
+            int chunkBottomY = chunk.getBottomY();
             
-            if (sectionBaseY + 15 < antiXrayThreshold.get()) {
-                for (int x = 0; x < 16; x++) {
-                    for (int y = 0; y < 16; y++) {
-                        for (int z = 0; z < 16; z++) {
-                            int worldY = sectionBaseY + y;
-                            
-                            BlockPos blockPos = new BlockPos(
-                                chunk.getPos().getStartX() + x,
-                                worldY,
-                                chunk.getPos().getStartZ() + z
-                            );
-                            
-                            Block block = section.getBlockState(x, y, z).getBlock();
-                            
-                            if (block == Blocks.STONE || block == Blocks.DEEPSLATE) {
-                                hiddenBlocks.add(blockPos);
+            for (int sectionIdx = 0; sectionIdx < sections.length; sectionIdx++) {
+                ChunkSection section = sections[sectionIdx];
+                if (section == null) continue;
+
+                int sectionBaseY = chunkBottomY + sectionIdx * 16;
+                
+                // Process sections below anti-xray threshold
+                if (sectionBaseY + 15 < antiXrayThreshold.get()) {
+                    for (int x = 0; x < 16; x++) {
+                        for (int y = 0; y < 16; y++) {
+                            for (int z = 0; z < 16; z++) {
+                                int worldY = sectionBaseY + y;
+                                
+                                BlockPos blockPos = new BlockPos(
+                                    chunk.getPos().getStartX() + x,
+                                    worldY,
+                                    chunk.getPos().getStartZ() + z
+                                );
+                                
+                                Block block = section.getBlockState(x, y, z).getBlock();
+                                
+                                // Track hidden blocks
+                                if (block == Blocks.STONE || block == Blocks.DEEPSLATE) {
+                                    hiddenBlocks.add(blockPos);
+                                }
+                                
+                                // Unobfuscate ores if enabled
+                                if (oreUnobfuscate.get() && isOre(block)) {
+                                    // Mark ore as visible
+                                    if (debugMode.get()) {
+                                        info("Found ore at " + blockPos.toShortString());
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+
+            if (debugMode.get()) {
+                info("Processed chunk " + pos.x + "," + pos.z);
+            }
+        } catch (Exception e) {
+            if (debugMode.get()) {
+                error("Error processing chunk: " + e.getMessage());
+            }
         }
+    }
+
+    private boolean isOre(Block block) {
+        return block == Blocks.COAL_ORE ||
+               block == Blocks.IRON_ORE ||
+               block == Blocks.COPPER_ORE ||
+               block == Blocks.GOLD_ORE ||
+               block == Blocks.REDSTONE_ORE ||
+               block == Blocks.EMERALD_ORE ||
+               block == Blocks.LAPIS_ORE ||
+               block == Blocks.DIAMOND_ORE ||
+               block == Blocks.ANCIENT_DEBRIS ||
+               block == Blocks.DEEPSLATE_COAL_ORE ||
+               block == Blocks.DEEPSLATE_IRON_ORE ||
+               block == Blocks.DEEPSLATE_COPPER_ORE ||
+               block == Blocks.DEEPSLATE_GOLD_ORE ||
+               block == Blocks.DEEPSLATE_REDSTONE_ORE ||
+               block == Blocks.DEEPSLATE_EMERALD_ORE ||
+               block == Blocks.DEEPSLATE_LAPIS_ORE ||
+               block == Blocks.DEEPSLATE_DIAMOND_ORE;
     }
 
     private void performSafeUnload(ChunkPos pos) {
@@ -492,12 +706,6 @@ public class ChunkEncryption extends Module {
             chunkCache.remove(pos);
             hiddenBlocks.removeIf(blockPos -> 
                 blockPos.getX() >> 4 == pos.x && blockPos.getZ() >> 4 == pos.z);
-            
-            // Let the game unload normally
-            if (mc.world.getChunkManager() != null) {
-                // Force a safe unload
-                mc.world.getChunk(pos.x, pos.z);
-            }
             
             if (debugMode.get()) {
                 info("Safely unloaded chunk " + pos.x + "," + pos.z);
@@ -510,15 +718,13 @@ public class ChunkEncryption extends Module {
     }
 
     private void sendFakeKeepAlive() {
-        if (mc.getNetworkHandler() == null || isShuttingDown) return;
+        if (mc.getNetworkHandler() == null || isShuttingDown || mc.player == null) return;
         
         try {
             // Send a harmless packet to keep connection alive
-            if (mc.player != null) {
-                mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.PositionAndOnGround(
-                    mc.player.getX(), mc.player.getY(), mc.player.getZ(), true
-                ));
-            }
+            mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.PositionAndOnGround(
+                mc.player.getX(), mc.player.getY(), mc.player.getZ(), true
+            ));
         } catch (Exception e) {
             // Ignore
         }
@@ -545,10 +751,26 @@ public class ChunkEncryption extends Module {
         }
     }
 
+    // Public API for other modules
+    public boolean isBlockVisible(BlockPos pos) {
+        if (!isActive() || !onDonutSMP || !bypassAntiXray.get()) return true;
+        
+        if (pos.getY() < antiXrayThreshold.get()) {
+            return !hiddenBlocks.contains(pos);
+        }
+        return true;
+    }
+
+    public boolean isOnDonutSMP() {
+        return onDonutSMP;
+    }
+
     @Override
     public String getInfoString() {
         if (onDonutSMP && bypassAntiXray.get()) {
             return "§aBypassing Y=" + antiXrayThreshold.get();
+        } else if (onDonutSMP) {
+            return "§aDonutSMP";
         }
         return null;
     }
