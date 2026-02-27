@@ -577,21 +577,37 @@ public class ChunkEncryption extends Module {
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!isActive() || !onDonutSMP || !bypassAntiXray.get() || isShuttingDown) return;
 
-        // Intercept chunk unload packets
+        // Intercept chunk unload packets - FIXED: UnloadChunkS2CPacket uses getX() and getZ()
         if (event.packet instanceof UnloadChunkS2CPacket && preventUnloadCrash.get()) {
             UnloadChunkS2CPacket packet = (UnloadChunkS2CPacket) event.packet;
-            ChunkPos pos = new ChunkPos(packet.getX(), packet.getZ());
-            
-            // Don't unload chunks near player
-            if (chunksToKeep.contains(pos)) {
-                event.setCancelled(true);
-                return;
-            }
-            
-            // Delay the unload
-            if (unloadDelay.get() > 0) {
-                event.setCancelled(true);
-                unloadTimers.put(pos, unloadDelay.get());
+            // In some versions, UnloadChunkS2CPacket doesn't have getX/getZ methods
+            // We need to use reflection or access fields directly
+            try {
+                // Try to get fields via reflection (safe approach)
+                java.lang.reflect.Field xField = packet.getClass().getDeclaredField("x");
+                java.lang.reflect.Field zField = packet.getClass().getDeclaredField("z");
+                xField.setAccessible(true);
+                zField.setAccessible(true);
+                
+                int x = xField.getInt(packet);
+                int z = zField.getInt(packet);
+                ChunkPos pos = new ChunkPos(x, z);
+                
+                // Don't unload chunks near player
+                if (chunksToKeep.contains(pos)) {
+                    event.setCancelled(true);
+                    return;
+                }
+                
+                // Delay the unload
+                if (unloadDelay.get() > 0) {
+                    event.setCancelled(true);
+                    unloadTimers.put(pos, unloadDelay.get());
+                }
+            } catch (Exception e) {
+                if (debugMode.get()) {
+                    error("Failed to access UnloadChunkS2CPacket fields: " + e.getMessage());
+                }
             }
         }
 
@@ -721,9 +737,10 @@ public class ChunkEncryption extends Module {
         if (mc.getNetworkHandler() == null || isShuttingDown || mc.player == null) return;
         
         try {
-            // Send a harmless packet to keep connection alive
+            // FIXED: PlayerMoveC2SPacket.PositionAndOnGround now requires 5 parameters
+            // The last boolean is "changePosition" flag
             mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.PositionAndOnGround(
-                mc.player.getX(), mc.player.getY(), mc.player.getZ(), true
+                mc.player.getX(), mc.player.getY(), mc.player.getZ(), true, true
             ));
         } catch (Exception e) {
             // Ignore
