@@ -288,6 +288,10 @@ public class ChunkEncryption extends Module {
                 decryptCipher = Cipher.getInstance("AES");
                 decryptCipher.init(Cipher.DECRYPT_MODE, secretKey);
                 break;
+                
+            case XOR:
+                // Simple XOR - no setup needed
+                break;
         }
     }
 
@@ -358,7 +362,7 @@ public class ChunkEncryption extends Module {
             mc.execute(() -> {
                 // Force chunk load by accessing it
                 WorldChunk chunk = mc.world.getChunk(pos.x, pos.z);
-                if (chunk != null && chunk.isLoaded()) {
+                if (chunk != null) {
                     processChunk(chunk);
                 }
             });
@@ -472,7 +476,7 @@ public class ChunkEncryption extends Module {
                block == Blocks.EMERALD_ORE ||
                block == Blocks.LAPIS_ORE ||
                block == Blocks.DIAMOND_ORE ||
-               block == Blocks.NETHERITE_ORE ||
+               block == Blocks.ANCIENT_DEBRIS ||  // Fixed: NETHERITE_ORE doesn't exist, use ANCIENT_DEBRIS
                block == Blocks.DEEPSLATE_COAL_ORE ||
                block == Blocks.DEEPSLATE_IRON_ORE ||
                block == Blocks.DEEPSLATE_COPPER_ORE ||
