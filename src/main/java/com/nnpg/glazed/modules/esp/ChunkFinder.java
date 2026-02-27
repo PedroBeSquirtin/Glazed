@@ -18,6 +18,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.option.Perspective;
 import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.passive.TraderLlamaEntity;
@@ -39,12 +40,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class ChunkFinder extends Module {
     // ============ CHUNK FINDER CONSTANTS ============
-    private static final int SUSPICION_THRESHOLD = 35; // Increased from 30 to 35
+    private static final int SUSPICION_THRESHOLD = 35;
     private static final int MAX_RENDER_DISTANCE = 32;
     private static final int CLEANUP_INTERVAL_MS = 30000;
     private static final int CHUNK_SCAN_DELAY_MS = 50;
     private static final int CHUNKS_PER_TICK = 8;
-    private static final double TRACER_HEIGHT = 60.0; // Fixed tracer height at Y=60
+    private static final double TRACER_HEIGHT = 60.0;
 
     // Y-Level detection rules
     private static final int DEEPSLATE_MAX_Y = 20;
@@ -61,7 +62,7 @@ public class ChunkFinder extends Module {
 
     // Detection thresholds
     private static final int BAMBOO_HEIGHT_THRESHOLD = 16;
-    private static final int AMETHYST_CLUSTER_REQUIRED = 5;
+    private static final int AMETHYST_CLUSTER_REQUIRED = 7; // Changed from 5 to 7
     private static final int AMETHYST_CLUSTER_POINTS = 6;
     private static final int LONG_VINES_THRESHOLD = 30;
     private static final int ROTATED_DEEPSLATE_POINTS = 3;
@@ -598,6 +599,7 @@ public class ChunkFinder extends Module {
         
         score += data.bambooCount * 4;
         
+        // Amethyst clusters - only count if 7 or more
         if (data.amethystClusters >= AMETHYST_CLUSTER_REQUIRED) {
             score += data.amethystClusters * AMETHYST_CLUSTER_POINTS;
         }
@@ -869,27 +871,22 @@ public class ChunkFinder extends Module {
 
     // ============ RENDERING ============
     @EventHandler
-    private void onRender3D(Render3DEvent event) {
+    private void onRender(Render3DEvent event) {
         if (mc.player == null || !isActive()) return;
 
-        // Use interpolated position for smooth movement (like ClusterFinder)
+        // Get player position with interpolation for smooth movement
         Vec3d playerPos = mc.player.getLerpedPos(event.tickDelta);
         
-        // Calculate camera/eye position for tracers
+        // Calculate camera position for tracers
         Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
         
-        // Determine start position based on perspective (like ClusterFinder)
+        // Determine start position based on perspective (like SkeletonESP)
         Vec3d startPos;
-        if (mc.options.getPerspective().isFirstPerson()) {
-            // First person: start tracer slightly forward from camera for better visibility
-            Vec3d lookDirection = mc.player.getRotationVector();
-            startPos = new Vec3d(
-                playerPos.x + lookDirection.x * 0.5,
-                playerPos.y + mc.player.getEyeHeight(mc.player.getPose()) + lookDirection.y * 0.5,
-                playerPos.z + lookDirection.z * 0.5
-            );
+        if (mc.options.getPerspective() == Perspective.FIRST_PERSON && mc.player == mc.player) {
+            // First person: start from camera position
+            startPos = cameraPos;
         } else {
-            // Third person: use normal eye position
+            // Third person: use player's eye position
             startPos = new Vec3d(
                 playerPos.x,
                 playerPos.y + mc.player.getEyeHeight(mc.player.getPose()),
@@ -907,6 +904,7 @@ public class ChunkFinder extends Module {
                 double targetZ = group.getCenterZ();
                 double targetY = TRACER_HEIGHT;
                 
+                // Draw tracer line exactly like SkeletonESP draws lines
                 event.renderer.line(
                     startPos.x, startPos.y, startPos.z,
                     targetX, targetY, targetZ,
@@ -936,7 +934,7 @@ public class ChunkFinder extends Module {
         int endX = pos.getEndX();
         int endZ = pos.getEndZ();
         
-        double y = 60; // Fixed render height
+        double y = 60;
         
         Box fillBox = new Box(startX, y, startZ, endX + 1, y + 0.1, endZ + 1);
         renderer.box(fillBox, CHUNK_COLOR, CHUNK_COLOR, ShapeMode.Both, 0);
