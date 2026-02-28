@@ -62,7 +62,6 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new SpawnerNotifier());
         Modules.get().add(new VineESP());
         Modules.get().add(new ChunkFinder());
-        Modules.get().add(new ChunkEncryption());
         Modules.get().add(new BlockNotifier());
         Modules.get().add(new SpawnerOrder());
         Modules.get().add(new RegionMap());
