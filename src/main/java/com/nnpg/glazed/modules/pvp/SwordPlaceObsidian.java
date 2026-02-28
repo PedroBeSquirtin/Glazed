@@ -7,7 +7,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -16,152 +15,94 @@ import net.minecraft.util.math.Vec3d;
 import java.util.Random;
 
 public class SwordPlaceObsidian extends Module {
-    private final SettingGroup sgGeneral = settings.createGroup("General");
-    private final SettingGroup sgHuman = settings.createGroup("Humanization");
+    private final SettingGroup sgGeneral = settings.createGroup("Settings");
 
-    // ============ GENERAL SETTINGS ============
-    private final Setting<Boolean> autoPlace = sgGeneral.add(new BoolSetting.Builder()
-        .name("auto-place")
-        .description("Automatically place obsidian when right-clicking with sword")
+    private final Setting<Boolean> enabled = sgGeneral.add(new BoolSetting.Builder()
+        .name("enabled")
+        .description("Enable obsidian placing")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Integer> placeDelay = sgGeneral.add(new IntSetting.Builder()
-        .name("place-delay")
-        .description("Ticks between placing (0-5)")
-        .defaultValue(1)
-        .min(0)
-        .max(5)
-        .sliderRange(0, 5)
-        .build()
-    );
-
-    private final Setting<Boolean> returnToSword = sgGeneral.add(new BoolSetting.Builder()
-        .name("return-to-sword")
-        .description("Switch back to sword after placing")
-        .defaultValue(true)
-        .build()
-    );
-
-    // ============ HUMANIZATION ============
-    private final Setting<Boolean> humanize = sgHuman.add(new BoolSetting.Builder()
-        .name("humanize")
-        .description("Add random delays to look human")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> minDelay = sgHuman.add(new IntSetting.Builder()
+    private final Setting<Integer> minDelay = sgGeneral.add(new IntSetting.Builder()
         .name("min-delay")
         .description("Minimum delay (ms)")
-        .defaultValue(30)
-        .min(10)
-        .max(100)
-        .sliderRange(10, 100)
-        .visible(humanize::get)
+        .defaultValue(50)
+        .min(30)
+        .max(200)
+        .sliderRange(30, 150)
         .build()
     );
 
-    private final Setting<Integer> maxDelay = sgHuman.add(new IntSetting.Builder()
+    private final Setting<Integer> maxDelay = sgGeneral.add(new IntSetting.Builder()
         .name("max-delay")
         .description("Maximum delay (ms)")
-        .defaultValue(80)
-        .min(20)
-        .max(200)
-        .sliderRange(20, 200)
-        .visible(humanize::get)
+        .defaultValue(120)
+        .min(50)
+        .max(300)
+        .sliderRange(50, 200)
         .build()
     );
 
-    // ============ STATE ============
     private boolean placing = false;
     private int previousSlot = -1;
-    private int delayTimer = 0;
+    private long nextActionTime = 0;
     private final Random random = new Random();
 
     public SwordPlaceObsidian() {
-        super(GlazedAddon.pvp, "sword-obi-place", "Place obsidian while holding sword - undetectable");
+        super(GlazedAddon.pvp, "sword-obi-place", "Smooth obsidian placement - undetectable");
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || !enabled.get()) return;
 
         ItemStack mainHand = mc.player.getMainHandStack();
         if (!isSword(mainHand)) return;
 
-        if (autoPlace.get() && mc.options.useKey.isPressed() && !placing) {
-            startPlacing();
-        }
+        long now = System.currentTimeMillis();
 
-        if (placing) {
-            handlePlacing();
-        }
-
-        if (placing && !mc.options.useKey.isPressed()) {
-            finishPlacing();
-        }
-
-        if (delayTimer > 0) delayTimer--;
-    }
-
-    private void startPlacing() {
-        int obsidianSlot = findObsidianSlot();
-        if (obsidianSlot == -1) return;
-
-        HitResult hit = mc.crosshairTarget;
-        if (!(hit instanceof BlockHitResult bhr)) return;
-
-        placing = true;
-        previousSlot = mc.player.getInventory().selectedSlot;
-
-        // Human-like delay before switching
-        if (humanize.get()) {
-            delayTimer = random.nextInt(maxDelay.get() - minDelay.get() + 1) + minDelay.get();
-        } else {
-            delayTimer = placeDelay.get();
-        }
-    }
-
-    private void handlePlacing() {
-        if (delayTimer > 0) return;
-
-        HitResult hit = mc.crosshairTarget;
-        if (!(hit instanceof BlockHitResult bhr)) {
-            placing = false;
-            return;
-        }
-
-        int obsidianSlot = findObsidianSlot();
-        if (obsidianSlot == -1) {
-            placing = false;
-            return;
-        }
-
-        // Switch to obsidian
-        mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(obsidianSlot));
-
-        // Place with natural timing
-        Vec3d placePos = bhr.getBlockPos().offset(bhr.getSide()).toCenterPos();
-        BlockHitResult placeTarget = new BlockHitResult(placePos, bhr.getSide(), bhr.getBlockPos(), false);
-
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, placeTarget);
-        mc.player.swingHand(Hand.MAIN_HAND);
-    }
-
-    private void finishPlacing() {
-        if (returnToSword.get() && previousSlot != -1) {
-            // Human-like delay before switching back
-            if (humanize.get()) {
-                try {
-                    Thread.sleep(random.nextInt(50) + 30);
-                } catch (InterruptedException e) {}
+        // Start placing
+        if (mc.options.useKey.isPressed() && !placing) {
+            HitResult hit = mc.crosshairTarget;
+            if (hit instanceof BlockHitResult bhr) {
+                int obsidianSlot = findObsidianSlot();
+                if (obsidianSlot != -1) {
+                    placing = true;
+                    previousSlot = mc.player.getInventory().selectedSlot;
+                    nextActionTime = now + getRandomDelay();
+                }
             }
-            mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(previousSlot));
         }
-        placing = false;
-        previousSlot = -1;
+
+        // Handle placing
+        if (placing && now >= nextActionTime) {
+            HitResult hit = mc.crosshairTarget;
+            if (hit instanceof BlockHitResult bhr) {
+                int obsidianSlot = findObsidianSlot();
+                if (obsidianSlot != -1) {
+                    // Switch to obsidian
+                    mc.player.getInventory().selectedSlot = obsidianSlot;
+                    
+                    // Place block
+                    Vec3d placePos = bhr.getBlockPos().offset(bhr.getSide()).toCenterPos();
+                    BlockHitResult placeTarget = new BlockHitResult(placePos, bhr.getSide(), bhr.getBlockPos(), false);
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, placeTarget);
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                    
+                    // Schedule switch back
+                    nextActionTime = now + getRandomDelay();
+                }
+            }
+        }
+
+        // Switch back
+        if (placing && !mc.options.useKey.isPressed() && now >= nextActionTime) {
+            if (previousSlot != -1) {
+                mc.player.getInventory().selectedSlot = previousSlot;
+            }
+            placing = false;
+        }
     }
 
     private boolean isSword(ItemStack stack) {
@@ -172,9 +113,12 @@ public class SwordPlaceObsidian extends Module {
 
     private int findObsidianSlot() {
         for (int i = 0; i < 9; i++) {
-            ItemStack stack = mc.player.getInventory().getStack(i);
-            if (stack.isOf(Items.OBSIDIAN)) return i;
+            if (mc.player.getInventory().getStack(i).isOf(Items.OBSIDIAN)) return i;
         }
         return -1;
+    }
+
+    private int getRandomDelay() {
+        return minDelay.get() + random.nextInt(maxDelay.get() - minDelay.get() + 1);
     }
 }
