@@ -4,179 +4,136 @@ import com.nnpg.glazed.GlazedAddon;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.BlockPos;  // <-- ADD THIS IMPORT
+import net.minecraft.util.math.BlockPos;
 
 import java.util.Random;
 
 public class AnchorMacro extends Module {
-    private final SettingGroup sgGeneral = settings.createGroup("General");
-    private final SettingGroup sgTimings = settings.createGroup("Timings");
-    private final SettingGroup sgHuman = settings.createGroup("Humanization");
+    private final SettingGroup sgGeneral = settings.createGroup("Settings");
 
-    // ============ GENERAL SETTINGS ============
+    private final Setting<Integer> reactionTime = sgGeneral.add(new IntSetting.Builder()
+        .name("reaction")
+        .description("Reaction time (ms)")
+        .defaultValue(100)
+        .min(60)
+        .max(250)
+        .sliderRange(60, 200)
+        .build()
+    );
+
+    private final Setting<Integer> switchDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("switch-delay")
+        .description("Item switch delay (ms)")
+        .defaultValue(80)
+        .min(50)
+        .max(200)
+        .sliderRange(50, 150)
+        .build()
+    );
+
     private final Setting<Integer> totemSlot = sgGeneral.add(new IntSetting.Builder()
         .name("totem-slot")
-        .description("Hotbar slot for totem (1-9)")
+        .description("Totem slot (1-9)")
         .defaultValue(1)
         .min(1)
         .max(9)
-        .sliderRange(1, 9)
         .build()
     );
 
-    private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
-        .name("auto-switch")
-        .description("Auto switch between anchor/glowstone")
-        .defaultValue(true)
-        .build()
-    );
-
-    // ============ TIMINGS ============
-    private final Setting<Integer> switchDelay = sgTimings.add(new IntSetting.Builder()
-        .name("switch-delay")
-        .description("Delay when switching items (ticks)")
-        .defaultValue(2)
-        .min(0)
-        .max(10)
-        .sliderRange(0, 10)
-        .build()
-    );
-
-    private final Setting<Integer> interactDelay = sgTimings.add(new IntSetting.Builder()
-        .name("interact-delay")
-        .description("Delay when interacting (ticks)")
-        .defaultValue(1)
-        .min(0)
-        .max(5)
-        .sliderRange(0, 5)
-        .build()
-    );
-
-    // ============ HUMANIZATION ============
-    private final Setting<Boolean> humanize = sgHuman.add(new BoolSetting.Builder()
-        .name("humanize")
-        .description("Add random delays")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> randomDelay = sgHuman.add(new IntSetting.Builder()
-        .name("random-delay")
-        .description("Extra random delay (ticks)")
-        .defaultValue(1)
-        .min(0)
-        .max(5)
-        .sliderRange(0, 5)
-        .visible(humanize::get)
-        .build()
-    );
-
-    // ============ STATE ============
-    private int timer = 0;
-    private boolean charging = false;
-    private boolean exploding = false;
+    private int step = 0;
+    private long nextActionTime = 0;
     private final Random random = new Random();
 
     public AnchorMacro() {
-        super(GlazedAddon.pvp, "anchor-macro", "Auto charge and explode anchors - undetectable");
+        super(GlazedAddon.pvp, "anchor-macro", "Natural anchor usage - low risk");
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null) return;
 
-        if (timer > 0) {
-            timer--;
-            return;
-        }
+        long now = System.currentTimeMillis();
+        if (now < nextActionTime) return;
 
         if (!(mc.crosshairTarget instanceof BlockHitResult bhr)) return;
-
         if (!mc.world.getBlockState(bhr.getBlockPos()).isOf(Blocks.RESPAWN_ANCHOR)) return;
 
-        // Check if holding right click
+        // Only activate when holding right click
         if (!mc.options.useKey.isPressed()) {
-            charging = false;
-            exploding = false;
+            step = 0;
             return;
         }
 
-        handleAnchor(bhr);
+        handleAnchor(bhr, now);
     }
 
-    private void handleAnchor(BlockHitResult bhr) {
-        int chargeLevel = getChargeLevel(bhr.getBlockPos());
+    private void handleAnchor(BlockHitResult bhr, long now) {
+        int charge = getChargeLevel(bhr.getBlockPos());
 
-        if (chargeLevel < 4) {
-            // Needs charging
-            if (!charging) {
-                startCharging(bhr);
-            } else {
-                continueCharging(bhr);
+        if (charge < 4) {
+            // Charging phase
+            if (step == 0) {
+                // Switch to glowstone if needed
+                if (!mc.player.getMainHandStack().isOf(Items.GLOWSTONE)) {
+                    switchToItem(Items.GLOWSTONE, now);
+                    step = 1;
+                } else {
+                    chargeAnchor(bhr, now);
+                }
+            } else if (step == 1) {
+                chargeAnchor(bhr, now);
             }
         } else {
-            // Full - ready to explode
-            if (!exploding) {
-                startExploding(bhr);
-            } else {
-                explode(bhr);
+            // Exploding phase
+            if (step == 0) {
+                // Switch to totem
+                switchToTotem(now);
+                step = 1;
+            } else if (step == 1) {
+                explodeAnchor(bhr, now);
+                step = 0;
             }
         }
     }
 
-    private void startCharging(BlockHitResult bhr) {
-        if (autoSwitch.get() && !mc.player.getMainHandStack().isOf(Items.GLOWSTONE)) {
-            InvUtils.findInHotbar(Items.GLOWSTONE).swap(true);
-            setDelay(switchDelay.get());
-        } else {
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-            mc.player.swingHand(Hand.MAIN_HAND);
-            charging = true;
-            setDelay(interactDelay.get());
-        }
-    }
-
-    private void continueCharging(BlockHitResult bhr) {
+    private void chargeAnchor(BlockHitResult bhr, long now) {
         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
         mc.player.swingHand(Hand.MAIN_HAND);
+        nextActionTime = now + reactionTime.get() + random.nextInt(40);
         
         if (getChargeLevel(bhr.getBlockPos()) >= 4) {
-            charging = false;
-            exploding = true;
+            step = 0;
         }
-        
-        setDelay(interactDelay.get());
     }
 
-    private void startExploding(BlockHitResult bhr) {
-        // Switch to totem
-        InvUtils.swap(totemSlot.get() - 1, true);
-        setDelay(switchDelay.get());
+    private void switchToItem(net.minecraft.item.Item item, long now) {
+        for (int i = 0; i < 9; i++) {
+            if (mc.player.getInventory().getStack(i).isOf(item)) {
+                mc.player.getInventory().selectedSlot = i;
+                nextActionTime = now + switchDelay.get() + random.nextInt(30);
+                break;
+            }
+        }
     }
 
-    private void explode(BlockHitResult bhr) {
+    private void switchToTotem(long now) {
+        mc.player.getInventory().selectedSlot = totemSlot.get() - 1;
+        nextActionTime = now + switchDelay.get() + random.nextInt(30);
+    }
+
+    private void explodeAnchor(BlockHitResult bhr, long now) {
         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
         mc.player.swingHand(Hand.MAIN_HAND);
-        exploding = false;
-        setDelay(interactDelay.get());
+        nextActionTime = now + reactionTime.get() + random.nextInt(40);
     }
 
     private int getChargeLevel(BlockPos pos) {
         return mc.world.getBlockState(pos).get(net.minecraft.block.RespawnAnchorBlock.CHARGES);
-    }
-
-    private void setDelay(int base) {
-        if (humanize.get() && randomDelay.get() > 0) {
-            timer = base + random.nextInt(randomDelay.get() + 1);
-        } else {
-            timer = base;
-        }
     }
 }
