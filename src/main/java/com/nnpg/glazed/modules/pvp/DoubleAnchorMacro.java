@@ -4,7 +4,6 @@ import com.nnpg.glazed.GlazedAddon;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Blocks;
@@ -17,208 +16,150 @@ import net.minecraft.util.math.BlockPos;
 import java.util.Random;
 
 public class DoubleAnchorMacro extends Module {
-    private final SettingGroup sgGeneral = settings.createGroup("General");
-    private final SettingGroup sgTimings = settings.createGroup("Timings");
-    private final SettingGroup sgHuman = settings.createGroup("Humanization");
+    private final SettingGroup sgGeneral = settings.createGroup("Settings");
 
-    // ============ GENERAL SETTINGS ============
     private final Setting<Keybind> activateKey = sgGeneral.add(new KeybindSetting.Builder()
-        .name("activate-key")
-        .description("Key to start double anchoring")
+        .name("key")
+        .description("Activation key")
         .defaultValue(Keybind.none())
+        .build()
+    );
+
+    private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
+        .name("delay")
+        .description("Delay between steps (ms)")
+        .defaultValue(100)
+        .min(60)
+        .max(250)
+        .sliderRange(60, 200)
+        .build()
+    );
+
+    private final Setting<Integer> variance = sgGeneral.add(new IntSetting.Builder()
+        .name("variance")
+        .description("Random variance (ms)")
+        .defaultValue(40)
+        .min(10)
+        .max(100)
+        .sliderRange(10, 80)
         .build()
     );
 
     private final Setting<Integer> totemSlot = sgGeneral.add(new IntSetting.Builder()
         .name("totem-slot")
-        .description("Hotbar slot for totem (1-9)")
+        .description("Totem slot (1-9)")
         .defaultValue(1)
         .min(1)
         .max(9)
-        .sliderRange(1, 9)
         .build()
     );
 
-    private final Setting<Boolean> stopOnMiss = sgGeneral.add(new BoolSetting.Builder()
-        .name("stop-on-miss")
-        .description("Stop if target block is no longer anchor")
-        .defaultValue(true)
-        .build()
-    );
-
-    // ============ TIMINGS ============
-    private final Setting<Integer> switchDelay = sgTimings.add(new IntSetting.Builder()
-        .name("switch-delay")
-        .description("Delay between item switches (ticks)")
-        .defaultValue(2)
-        .min(0)
-        .max(10)
-        .sliderRange(0, 10)
-        .build()
-    );
-
-    private final Setting<Integer> placeDelay = sgTimings.add(new IntSetting.Builder()
-        .name("place-delay")
-        .description("Delay between placements (ticks)")
-        .defaultValue(1)
-        .min(0)
-        .max(5)
-        .sliderRange(0, 5)
-        .build()
-    );
-
-    // ============ HUMANIZATION ============
-    private final Setting<Boolean> humanize = sgHuman.add(new BoolSetting.Builder()
-        .name("humanize")
-        .description("Add random delays to look human")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> variance = sgHuman.add(new IntSetting.Builder()
-        .name("variance")
-        .description("Random delay variance (ticks)")
-        .defaultValue(1)
-        .min(0)
-        .max(5)
-        .sliderRange(0, 5)
-        .visible(humanize::get)
-        .build()
-    );
-
-    // ============ STATE ============
     private int step = 0;
-    private int delayCounter = 0;
-    private boolean running = false;
+    private long nextActionTime = 0;
     private BlockPos targetPos = null;
     private final Random random = new Random();
-    private boolean wasPressed = false;
 
     public DoubleAnchorMacro() {
-        super(GlazedAddon.pvp, "double-anchor", "Place and charge 2 anchors - undetectable");
+        super(GlazedAddon.pvp, "double-anchor", "Natural double anchoring - low risk");
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null) return;
 
-        boolean keyPressed = activateKey.get().isPressed();
+        long now = System.currentTimeMillis();
 
-        if (!running && keyPressed && !wasPressed) {
-            startAnchoring();
-        }
-
-        wasPressed = keyPressed;
-
-        if (!running) return;
-
-        if (stopOnMiss.get() && !isValidTarget()) {
-            stopAnchoring();
+        if (!activateKey.get().isPressed()) {
+            step = 0;
+            targetPos = null;
             return;
         }
 
-        if (delayCounter > 0) {
-            delayCounter--;
-            return;
+        if (now < nextActionTime) return;
+
+        if (targetPos == null) {
+            if (!(mc.crosshairTarget instanceof BlockHitResult bhr)) return;
+            if (!mc.world.getBlockState(bhr.getBlockPos()).isOf(Blocks.RESPAWN_ANCHOR)) return;
+            targetPos = bhr.getBlockPos();
+            step = 0;
         }
 
-        executeStep();
+        executeStep(now);
     }
 
-    private void startAnchoring() {
-        if (!(mc.crosshairTarget instanceof BlockHitResult bhr)) return;
+    private void executeStep(long now) {
+        if (targetPos == null) return;
 
-        targetPos = bhr.getBlockPos();
-        if (!mc.world.getBlockState(targetPos).isOf(Blocks.RESPAWN_ANCHOR)) return;
-
-        running = true;
-        step = 0;
-        delayCounter = 0;
-    }
-
-    private boolean isValidTarget() {
-        if (targetPos == null) return false;
-        return mc.world.getBlockState(targetPos).isOf(Blocks.RESPAWN_ANCHOR);
-    }
-
-    private void executeStep() {
-        if (!(mc.crosshairTarget instanceof BlockHitResult bhr)) {
-            stopAnchoring();
-            return;
-        }
+        BlockHitResult bhr = new BlockHitResult(
+            targetPos.toCenterPos(),
+            mc.player.getHorizontalFacing(),
+            targetPos,
+            false
+        );
 
         switch (step) {
             case 0: // Switch to anchor
-                InvUtils.findInHotbar(Items.RESPAWN_ANCHOR).swap(true);
-                setDelay();
+                switchToItem(Items.RESPAWN_ANCHOR, now);
+                step = 1;
                 break;
-
-            case 1: // Place first anchor
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-                mc.player.swingHand(Hand.MAIN_HAND);
-                setDelay();
+            case 1: // Place first
+                interact(bhr, now);
+                step = 2;
                 break;
-
             case 2: // Switch to glowstone
-                InvUtils.findInHotbar(Items.GLOWSTONE).swap(true);
-                setDelay();
+                switchToItem(Items.GLOWSTONE, now);
+                step = 3;
                 break;
-
-            case 3: // Charge first anchor
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-                mc.player.swingHand(Hand.MAIN_HAND);
-                setDelay();
+            case 3: // Charge first
+                interact(bhr, now);
+                step = 4;
                 break;
-
             case 4: // Switch to anchor again
-                InvUtils.findInHotbar(Items.RESPAWN_ANCHOR).swap(true);
-                setDelay();
+                switchToItem(Items.RESPAWN_ANCHOR, now);
+                step = 5;
                 break;
-
-            case 5: // Place second anchor
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-                mc.player.swingHand(Hand.MAIN_HAND);
-                setDelay();
+            case 5: // Place second
+                interact(bhr, now);
+                step = 6;
                 break;
-
             case 6: // Switch to glowstone again
-                InvUtils.findInHotbar(Items.GLOWSTONE).swap(true);
-                setDelay();
+                switchToItem(Items.GLOWSTONE, now);
+                step = 7;
                 break;
-
-            case 7: // Charge second anchor
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-                mc.player.swingHand(Hand.MAIN_HAND);
-                setDelay();
+            case 7: // Charge second
+                interact(bhr, now);
+                step = 8;
                 break;
-
             case 8: // Switch to totem
-                InvUtils.swap(totemSlot.get() - 1, true);
-                setDelay();
+                switchToTotem(now);
+                step = 9;
                 break;
-
             case 9: // Explode
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
-                mc.player.swingHand(Hand.MAIN_HAND);
-                stopAnchoring();
-                return;
-        }
-
-        step++;
-    }
-
-    private void setDelay() {
-        int baseDelay = (step % 2 == 0) ? switchDelay.get() : placeDelay.get();
-        if (humanize.get() && variance.get() > 0) {
-            delayCounter = baseDelay + random.nextInt(variance.get() + 1);
-        } else {
-            delayCounter = baseDelay;
+                interact(bhr, now);
+                step = 0;
+                targetPos = null;
+                break;
         }
     }
 
-    private void stopAnchoring() {
-        running = false;
-        step = 0;
-        targetPos = null;
+    private void switchToItem(net.minecraft.item.Item item, long now) {
+        for (int i = 0; i < 9; i++) {
+            if (mc.player.getInventory().getStack(i).isOf(item)) {
+                mc.player.getInventory().selectedSlot = i;
+                nextActionTime = now + delay.get() + random.nextInt(variance.get());
+                break;
+            }
+        }
+    }
+
+    private void switchToTotem(long now) {
+        mc.player.getInventory().selectedSlot = totemSlot.get() - 1;
+        nextActionTime = now + delay.get() + random.nextInt(variance.get());
+    }
+
+    private void interact(BlockHitResult bhr, long now) {
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        nextActionTime = now + delay.get() + random.nextInt(variance.get());
     }
 }
