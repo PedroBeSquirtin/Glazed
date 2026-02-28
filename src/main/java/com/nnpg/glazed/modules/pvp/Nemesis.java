@@ -29,7 +29,7 @@ public class Nemesis extends Module {
 
     // ============ COMBAT SETTINGS ============
     private final Setting<Boolean> autoShieldBreak = sgCombat.add(new BoolSetting.Builder()
-        .name("auto-shield-break")
+        .name("shield-break")
         .description("Break shields with axe")
         .defaultValue(true)
         .build()
@@ -43,7 +43,7 @@ public class Nemesis extends Module {
     );
 
     private final Setting<Boolean> attackEnabled = sgCombat.add(new BoolSetting.Builder()
-        .name("auto-attack")
+        .name("attack")
         .description("Automatically attack when in range")
         .defaultValue(false)
         .build()
@@ -62,7 +62,7 @@ public class Nemesis extends Module {
 
     private final Setting<Double> combatRange = sgCombat.add(new DoubleSetting.Builder()
         .name("range")
-        .description("Combat engagement range")
+        .description("Combat range")
         .defaultValue(4.2)
         .min(1)
         .max(6)
@@ -122,7 +122,7 @@ public class Nemesis extends Module {
     private final Random random = new Random();
 
     public Nemesis() {
-        super(GlazedAddon.pvp, "nemesis", "Undetectable auto fight - shield break, pearls, water, combat");
+        super(GlazedAddon.pvp, "nemesis", "Ultimate auto fight - shield break, pearls, water, combat");
     }
 
     @Override
@@ -133,60 +133,47 @@ public class Nemesis extends Module {
         isBreakingShield = false;
     }
 
+    @Override
+    public void onDeactivate() {
+        target = null;
+    }
+
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        // Find target (natural, human-like targeting)
-        updateTarget();
-
-        // Cobweb escape (high priority)
+        // COBWEB ESCAPE - HIGHEST PRIORITY
         if (cobwebEscape.get() && isInCobweb()) {
-            handleCobweb();
-            return; // Prioritize escape over combat
+            handleCobwebEscape();
+            target = null; // Don't target while in cobweb
+            return;
         }
 
-        // Water bucket if on fire
+        // WATER BUCKET - HIGH PRIORITY
         if (waterBucket.get() && mc.player.isOnFire()) {
             handleWaterBucket();
         }
+
+        // Find target (skip if in cobweb)
+        updateTarget();
 
         if (target == null) return;
 
         double distance = mc.player.distanceTo(target);
 
-        // Pearl closing
+        // PEARL CLOSING
         if (pearlClose.get() && distance >= pearlDistance.get() && canThrowPearl()) {
             handlePearlThrow();
             return;
         }
 
-        // Combat logic
+        // COMBAT LOGIC
         if (distance <= combatRange.get()) {
             handleCombat();
         }
 
         // Update timers
         if (attackTimer > 0) attackTimer--;
-    }
-
-    private void updateTarget() {
-        // Natural targeting - don't lock on if in cobweb
-        if (cobwebEscape.get() && isInCobweb()) {
-            target = null;
-            return;
-        }
-
-        // Find nearest valid target
-        target = mc.world.getPlayers().stream()
-            .filter(p -> p != mc.player)
-            .filter(p -> !Friends.get().isFriend(p))
-            .filter(p -> p.isAlive())
-            .filter(p -> mc.player.distanceTo(p) <= combatRange.get() * 2)
-            .min((p1, p2) -> Double.compare(
-                mc.player.distanceTo(p1),
-                mc.player.distanceTo(p2)))
-            .orElse(null);
     }
 
     private boolean isInCobweb() {
@@ -196,16 +183,26 @@ public class Nemesis extends Module {
                mc.world.getBlockState(pos.up()).getBlock() == Blocks.COBWEB;
     }
 
-    private void handleCobweb() {
+    private void handleCobwebEscape() {
         cobwebTimer++;
-        // Jump every other tick to escape
+        // Jump every tick to escape faster
         if (cobwebTimer % 2 == 0) {
             mc.player.jump();
         }
-        // Reset target to prevent locking
-        target = null;
-        // Reset after 20 ticks
-        if (cobwebTimer > 20) cobwebTimer = 0;
+        // Reset timer to prevent infinite
+        if (cobwebTimer > 30) cobwebTimer = 0;
+    }
+
+    private void updateTarget() {
+        target = mc.world.getPlayers().stream()
+            .filter(p -> p != mc.player)
+            .filter(p -> !Friends.get().isFriend(p))
+            .filter(p -> p.isAlive())
+            .filter(p -> mc.player.distanceTo(p) <= combatRange.get() * 2)
+            .min((p1, p2) -> Double.compare(
+                mc.player.distanceTo(p1),
+                mc.player.distanceTo(p2)))
+            .orElse(null);
     }
 
     private void handleWaterBucket() {
@@ -222,7 +219,7 @@ public class Nemesis extends Module {
             waterPlacedAt = pos;
             
             if (pickupWater.get()) {
-                // Schedule pickup after a short delay
+                // Schedule pickup after delay
                 new Thread(() -> {
                     try {
                         Thread.sleep(150 + random.nextInt(50));
@@ -252,7 +249,7 @@ public class Nemesis extends Module {
     }
 
     private boolean canThrowPearl() {
-        return System.currentTimeMillis() - lastPearlTime > 2500; // 2.5 second cooldown
+        return System.currentTimeMillis() - lastPearlTime > 2000 + random.nextInt(500);
     }
 
     private void handlePearlThrow() {
@@ -262,7 +259,7 @@ public class Nemesis extends Module {
         int prevSlot = mc.player.getInventory().selectedSlot;
         InvUtils.swap(pearl.slot(), false);
         
-        // Human-like rotation before throw
+        // Natural-looking rotation before throw
         Rotations.rotate(mc.player.getYaw(), mc.player.getPitch(), 50 + random.nextInt(30), () -> {
             mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
         });
@@ -274,26 +271,25 @@ public class Nemesis extends Module {
     private void handleCombat() {
         if (target == null) return;
 
-        // Check if target is blocking
         boolean targetBlocking = target.isUsingItem() && 
                                  target.getActiveItem().getItem() == Items.SHIELD;
 
-        // Shield break logic
+        // SHIELD BREAK (Priority #1)
         if (autoShieldBreak.get() && targetBlocking && !isBreakingShield) {
             handleShieldBreak();
             return;
         }
 
-        // Auto weapon switch
+        // AUTO WEAPON (Priority #2)
         if (autoWeapon.get() && !isBreakingShield) {
             equipBestWeapon();
         }
 
-        // Auto attack
+        // AUTO ATTACK (Priority #3)
         if (attackEnabled.get() && attackTimer <= 0 && !isBreakingShield) {
             if (mc.player.distanceTo(target) <= combatRange.get()) {
                 attack();
-                attackTimer = attackDelay.get();
+                attackTimer = attackDelay.get() + random.nextInt(3);
             }
         }
     }
@@ -310,8 +306,8 @@ public class Nemesis extends Module {
         // Attack to break shield
         attack();
         
-        // Schedule switch back to weapon
-        int switchDelay = 80 + random.nextInt(40); // 80-120ms
+        // Schedule switch back to weapon with human-like delay
+        int switchDelay = 80 + random.nextInt(60); // 80-140ms
         new Thread(() -> {
             try {
                 Thread.sleep(switchDelay);
@@ -332,7 +328,7 @@ public class Nemesis extends Module {
         );
         
         if (weapon.found() && weapon.slot() != mc.player.getInventory().selectedSlot) {
-            // Randomize switch timing to look human
+            // Only switch sometimes to look natural
             if (random.nextInt(3) == 0) {
                 InvUtils.swap(weapon.slot(), false);
             }
@@ -342,8 +338,8 @@ public class Nemesis extends Module {
     private void attack() {
         if (target == null || target.isRemoved()) return;
         
-        // Randomize attack timing slightly
-        if (random.nextInt(5) != 0) {
+        // Miss sometimes to look human
+        if (random.nextInt(10) != 0) { // 90% hit chance
             mc.interactionManager.attackEntity(mc.player, target);
             mc.player.swingHand(Hand.MAIN_HAND);
         }
