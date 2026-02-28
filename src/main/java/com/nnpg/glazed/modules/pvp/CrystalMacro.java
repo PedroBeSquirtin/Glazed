@@ -1,8 +1,6 @@
 package com.nnpg.glazed.modules.pvp;
 
 import com.nnpg.glazed.GlazedAddon;
-import com.nnpg.glazed.utils.glazed.BlockUtil;
-import com.nnpg.glazed.utils.glazed.KeyUtils;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -10,9 +8,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
-import net.minecraft.entity.mob.SlimeEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
@@ -22,222 +18,197 @@ import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
-import java.util.HashSet;
-import java.util.Set;
+import java.util.Random;
 
 public class CrystalMacro extends Module {
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgGeneral = settings.createGroup("General");
+    private final SettingGroup sgTimings = settings.createGroup("Timings");
+    private final SettingGroup sgHuman = settings.createGroup("Humanization");
+
+    // ============ GENERAL SETTINGS ============
+    private final Setting<Boolean> placeCrystals = sgGeneral.add(new BoolSetting.Builder()
+        .name("place-crystals")
+        .description("Auto-place crystals")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> breakCrystals = sgGeneral.add(new BoolSetting.Builder()
+        .name("break-crystals")
+        .description("Auto-break crystals")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> placeObsidian = sgGeneral.add(new BoolSetting.Builder()
+        .name("place-obsidian")
+        .description("Place obsidian if missing")
+        .defaultValue(true)
+        .build()
+    );
 
     private final Setting<Integer> activateKey = sgGeneral.add(new IntSetting.Builder()
         .name("activate-key")
-        .description("Key that does the crystalling.")
+        .description("Key to activate (1 = left click, 2 = right click)")
         .defaultValue(1)
-        .min(-1)
-        .max(400)
+        .min(1)
+        .max(2)
         .build()
     );
 
-    private final Setting<Double> placeDelay = sgGeneral.add(new DoubleSetting.Builder()
+    // ============ TIMINGS ============
+    private final Setting<Integer> placeDelay = sgTimings.add(new IntSetting.Builder()
         .name("place-delay")
-        .description("The delay in ticks between placing crystals.")
-        .defaultValue(0.0)
-        .min(0.0)
-        .max(20.0)
-        .sliderMax(20.0)
+        .description("Delay between placements (ticks)")
+        .defaultValue(1)
+        .min(0)
+        .max(5)
+        .sliderRange(0, 5)
         .build()
     );
 
-    private final Setting<Double> breakDelay = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> breakDelay = sgTimings.add(new IntSetting.Builder()
         .name("break-delay")
-        .description("The delay in ticks between breaking crystals.")
-        .defaultValue(0.0)
-        .min(0.0)
-        .max(20.0)
-        .sliderMax(20.0)
+        .description("Delay between breaks (ticks)")
+        .defaultValue(1)
+        .min(0)
+        .max(5)
+        .sliderRange(0, 5)
         .build()
     );
 
-    private final Setting<Boolean> stopOnKill = sgGeneral.add(new BoolSetting.Builder()
-        .name("stop-on-kill")
-        .description("Pauses the macro when a nearby player dies, then resumes after 5 seconds.")
+    // ============ HUMANIZATION ============
+    private final Setting<Boolean> humanize = sgHuman.add(new BoolSetting.Builder()
+        .name("humanize")
+        .description("Add random delays to look human")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Boolean> placeObsidianIfMissing = sgGeneral.add(new BoolSetting.Builder()
-        .name("place-obsidian-if-missing")
-        .description("Places obsidian if the target block isn't obsidian or bedrock.")
-        .defaultValue(true)
+    private final Setting<Integer> missChance = sgHuman.add(new IntSetting.Builder()
+        .name("miss-chance")
+        .description("Chance to miss a hit (%)")
+        .defaultValue(5)
+        .min(0)
+        .max(20)
+        .sliderRange(0, 20)
         .build()
     );
 
-    private int placeDelayCounter;
-    private int breakDelayCounter;
-
-    private final Set<PlayerEntity> deadPlayers = new HashSet<>();
-    private boolean paused = false;
-    private long resumeTime = 0;
+    // ============ STATE ============
+    private int placeTimer = 0;
+    private int breakTimer = 0;
+    private final Random random = new Random();
 
     public CrystalMacro() {
-        super(GlazedAddon.pvp, "crystal-macro", "Automatically crystals fast for you");
-    }
-
-    @Override
-    public void onActivate() {
-        resetCounters();
-        deadPlayers.clear();
-        paused = false;
-        resumeTime = 0;
-    }
-
-    @Override
-    public void onDeactivate() {
-        resetCounters();
-        deadPlayers.clear();
-        paused = false;
-        resumeTime = 0;
-    }
-
-    private void resetCounters() {
-        placeDelayCounter = 0;
-        breakDelayCounter = 0;
+        super(GlazedAddon.pvp, "crystal-macro", "Auto crystal place/break - undetectable");
     }
 
     @EventHandler
-    private void onTick(final TickEvent.Pre event) {
-        if (mc.currentScreen != null) return;
+    private void onTick(TickEvent.Pre event) {
+        if (mc.player == null || mc.world == null) return;
 
-        updateCounters();
+        // Update timers
+        if (placeTimer > 0) placeTimer--;
+        if (breakTimer > 0) breakTimer--;
 
-        if (paused && System.currentTimeMillis() >= resumeTime) {
-            paused = false;
-            if (mc.player != null) {
-                mc.player.sendMessage(net.minecraft.text.Text.literal(
-                    "§7[§bLegitCrystalMacro§7] §aResumed after stop-on-kill"
-                ), false);
-            }
+        // Check if key is pressed
+        boolean keyPressed = activateKey.get() == 1 ? 
+            mc.options.attackKey.isPressed() : mc.options.useKey.isPressed();
+
+        if (!keyPressed) return;
+
+        // Check if holding crystal
+        if (!mc.player.getMainHandStack().isOf(Items.END_CRYSTAL)) return;
+
+        HitResult target = mc.crosshairTarget;
+
+        if (target instanceof BlockHitResult blockHit && placeCrystals.get()) {
+            handleBlockHit(blockHit);
+        } else if (target instanceof EntityHitResult entityHit && breakCrystals.get()) {
+            handleEntityHit(entityHit);
         }
+    }
 
-        if (paused) return;
-        if (!isKeyActive()) return;
-        if (mc.player.isUsingItem()) return;
-        if (mc.player.getMainHandStack().getItem() != Items.END_CRYSTAL) return;
+    private void handleBlockHit(BlockHitResult blockHit) {
+        if (placeTimer > 0) return;
 
-        if (stopOnKill.get() && checkForDeadPlayers()) {
-            paused = true;
-            resumeTime = System.currentTimeMillis() + 5000;
-            if (mc.player != null) {
-                mc.player.sendMessage(net.minecraft.text.Text.literal(
-                    "§7[§bLegitCrystalMacro§7] §cPaused due to player death (will resume in 5s)"
-                ), false);
+        BlockPos pos = blockHit.getBlockPos();
+
+        // Check if we need to place obsidian
+        if (placeObsidian.get() && !isValidCrystalBlock(pos)) {
+            int obsidianSlot = findItemSlot(Items.OBSIDIAN);
+            if (obsidianSlot != -1) {
+                mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(obsidianSlot));
+                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHit);
+                mc.player.swingHand(Hand.MAIN_HAND);
+                
+                // Switch back to crystals
+                int crystalSlot = findItemSlot(Items.END_CRYSTAL);
+                if (crystalSlot != -1) {
+                    mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(crystalSlot));
+                }
+                
+                setDelay(true);
             }
             return;
         }
 
-        handleInteraction();
-    }
-
-    private void updateCounters() {
-        if (placeDelayCounter > 0) --placeDelayCounter;
-        if (breakDelayCounter > 0) --breakDelayCounter;
-    }
-
-    private boolean isKeyActive() {
-        int d = activateKey.get();
-        return d == -1 || KeyUtils.isKeyPressed(d);
-    }
-
-    private void handleInteraction() {
-        HitResult crosshairTarget = mc.crosshairTarget;
-        if (crosshairTarget instanceof BlockHitResult blockHit) {
-            handleBlockInteraction(blockHit);
-        } else if (crosshairTarget instanceof EntityHitResult entityHit) {
-            handleEntityInteraction(entityHit);
-        }
-    }
-
-    private void handleBlockInteraction(BlockHitResult blockHitResult) {
-        if (blockHitResult.getType() != HitResult.Type.BLOCK) return;
-        if (placeDelayCounter > 0) return;
-
-        BlockPos blockPos = blockHitResult.getBlockPos();
-        boolean isObsidianOrBedrock = BlockUtil.isBlockAtPosition(blockPos, Blocks.OBSIDIAN) ||
-                                      BlockUtil.isBlockAtPosition(blockPos, Blocks.BEDROCK);
-
-        if (!isObsidianOrBedrock && placeObsidianIfMissing.get()) {
-            int obsidianSlot = findObsidianSlot();
-            int crystalSlot = findCrystalSlot();
-
-            if (obsidianSlot == -1 || crystalSlot == -1) return;
-
-            mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(obsidianSlot));
-            BlockUtil.interactWithBlock(blockHitResult, true);
+        // Place crystal
+        if (isValidCrystalBlock(pos) && isValidCrystalPlacement(pos)) {
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, blockHit);
             mc.player.swingHand(Hand.MAIN_HAND);
-            placeDelayCounter = placeDelay.get().intValue();
-
-            mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(crystalSlot));
-            return;
-        }
-
-        if (isObsidianOrBedrock && isValidCrystalPlacement(blockPos)) {
-            BlockUtil.interactWithBlock(blockHitResult, true);
-            placeDelayCounter = placeDelay.get().intValue();
+            setDelay(true);
         }
     }
 
-    private void handleEntityInteraction(EntityHitResult entityHitResult) {
-        if (breakDelayCounter > 0) return;
+    private void handleEntityHit(EntityHitResult entityHit) {
+        if (breakTimer > 0) return;
 
-        Entity entity = entityHitResult.getEntity();
-        if (!(entity instanceof EndCrystalEntity) && !(entity instanceof SlimeEntity)) return;
+        Entity entity = entityHit.getEntity();
+        if (!(entity instanceof EndCrystalEntity)) return;
+
+        // Chance to miss (looks human)
+        if (humanize.get() && random.nextInt(100) < missChance.get()) {
+            setDelay(false);
+            return;
+        }
 
         mc.interactionManager.attackEntity(mc.player, entity);
         mc.player.swingHand(Hand.MAIN_HAND);
-        breakDelayCounter = breakDelay.get().intValue();
+        setDelay(false);
     }
 
-    private boolean isValidCrystalPlacement(BlockPos blockPos) {
-        BlockPos up = blockPos.up();
+    private boolean isValidCrystalBlock(BlockPos pos) {
+        return mc.world.getBlockState(pos).isOf(Blocks.OBSIDIAN) ||
+               mc.world.getBlockState(pos).isOf(Blocks.BEDROCK);
+    }
+
+    private boolean isValidCrystalPlacement(BlockPos pos) {
+        BlockPos up = pos.up();
         if (!mc.world.isAir(up)) return false;
 
-        int x = up.getX(), y = up.getY(), z = up.getZ();
-        return mc.world.getOtherEntities(null, new Box(x, y, z, x + 1.0, y + 2.0, z + 1.0)).isEmpty();
+        Box box = new Box(up).expand(0.1);
+        return mc.world.getOtherEntities(null, box, e -> e instanceof EndCrystalEntity).isEmpty();
     }
 
-    private boolean checkForDeadPlayers() {
-        if (mc.world == null) return false;
-
-        for (PlayerEntity player : mc.world.getPlayers()) {
-            if (player == mc.player) continue;
-
-            String name = player.getGameProfile().getName();
-            boolean isBedrock = name.startsWith(".");
-
-            if (player.isDead() || player.getHealth() <= 0) {
-                if (!deadPlayers.contains(player)) {
-                    deadPlayers.add(player);
-                    return true;
-                }
-            }
-        }
-
-        deadPlayers.removeIf(p -> !p.isDead() && p.getHealth() > 0);
-        return false;
-    }
-
-    private int findObsidianSlot() {
+    private int findItemSlot(net.minecraft.item.Item item) {
         for (int i = 0; i < 9; i++) {
-            ItemStack stack = mc.player.getInventory().getStack(i);
-            if (stack.isOf(Items.OBSIDIAN)) return i;
+            if (mc.player.getInventory().getStack(i).isOf(item)) return i;
         }
         return -1;
     }
 
-    private int findCrystalSlot() {
-        for (int i = 0; i < 9; i++) {
-            ItemStack stack = mc.player.getInventory().getStack(i);
-            if (stack.isOf(Items.END_CRYSTAL)) return i;
+    private void setDelay(boolean isPlace) {
+        int baseDelay = isPlace ? placeDelay.get() : breakDelay.get();
+        
+        if (humanize.get()) {
+            // Add random variance
+            placeTimer = baseDelay + random.nextInt(3);
+            breakTimer = baseDelay + random.nextInt(3);
+        } else {
+            placeTimer = baseDelay;
+            breakTimer = baseDelay;
         }
-        return -1;
     }
 }
