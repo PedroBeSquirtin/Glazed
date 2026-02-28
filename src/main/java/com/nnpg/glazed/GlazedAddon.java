@@ -78,6 +78,7 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new RTPNetherBaseFinder());
         Modules.get().add(new HomeReset());
         Modules.get().add(new KeyPearl());
+        Modules.get().add(new Nemesis());
         Modules.get().add(new DrownedTridentESP());
         Modules.get().add(new RTPBaseFinder());
         Modules.get().add(new HoverTotem());
