@@ -1,196 +1,181 @@
 package com.nnpg.glazed.modules.pvp;
 
 import com.nnpg.glazed.GlazedAddon;
-import com.nnpg.glazed.VersionUtil;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import com.nnpg.glazed.utils.glazed.KeyUtils;
-import com.nnpg.glazed.utils.glazed.BlockUtil;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Blocks;
-import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.Items;
-import net.minecraft.item.ShieldItem;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
-import org.lwjgl.glfw.GLFW;
+import net.minecraft.util.hit.HitResult;
+
+import java.util.Random;
 
 public class AnchorMacro extends Module {
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgGeneral = settings.createGroup("General");
+    private final SettingGroup sgTimings = settings.createGroup("Timings");
+    private final SettingGroup sgHuman = settings.createGroup("Humanization");
 
-    private final Setting<Double> switchDelay = sgGeneral.add(new DoubleSetting.Builder()
-        .name("switch-delay")
-        .description("Delay in ticks before switching items.")
-        .defaultValue(0.0)
-        .min(0.0)
-        .max(20.0)
-        .sliderMax(20.0)
-        .build()
-    );
-
-    private final Setting<Double> glowstoneDelay = sgGeneral.add(new DoubleSetting.Builder()
-        .name("glowstone-delay")
-        .description("Delay in ticks before placing glowstone.")
-        .defaultValue(0.0)
-        .min(0.0)
-        .max(20.0)
-        .sliderMax(20.0)
-        .build()
-    );
-
-    private final Setting<Double> explodeDelay = sgGeneral.add(new DoubleSetting.Builder()
-        .name("explode-delay")
-        .description("Delay in ticks before exploding the anchor.")
-        .defaultValue(0.0)
-        .min(0.0)
-        .max(20.0)
-        .sliderMax(20.0)
-        .build()
-    );
-
+    // ============ GENERAL SETTINGS ============
     private final Setting<Integer> totemSlot = sgGeneral.add(new IntSetting.Builder()
         .name("totem-slot")
-        .description("Hotbar slot to switch to when exploding (1-9).")
+        .description("Hotbar slot for totem (1-9)")
         .defaultValue(1)
         .min(1)
         .max(9)
+        .sliderRange(1, 9)
         .build()
     );
 
-    private int keybindCounter;
-    private int glowstoneDelayCounter;
-    private int explodeDelayCounter;
-    private boolean hasPlacedGlowstone = false;
-    private boolean hasExplodedAnchor = false;
-    private BlockHitResult lastBlockHitResult = null;
+    private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-switch")
+        .description("Auto switch between anchor/glowstone")
+        .defaultValue(true)
+        .build()
+    );
+
+    // ============ TIMINGS ============
+    private final Setting<Integer> switchDelay = sgTimings.add(new IntSetting.Builder()
+        .name("switch-delay")
+        .description("Delay when switching items (ticks)")
+        .defaultValue(2)
+        .min(0)
+        .max(10)
+        .sliderRange(0, 10)
+        .build()
+    );
+
+    private final Setting<Integer> interactDelay = sgTimings.add(new IntSetting.Builder()
+        .name("interact-delay")
+        .description("Delay when interacting (ticks)")
+        .defaultValue(1)
+        .min(0)
+        .max(5)
+        .sliderRange(0, 5)
+        .build()
+    );
+
+    // ============ HUMANIZATION ============
+    private final Setting<Boolean> humanize = sgHuman.add(new BoolSetting.Builder()
+        .name("humanize")
+        .description("Add random delays")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> randomDelay = sgHuman.add(new IntSetting.Builder()
+        .name("random-delay")
+        .description("Extra random delay (ticks)")
+        .defaultValue(1)
+        .min(0)
+        .max(5)
+        .sliderRange(0, 5)
+        .visible(humanize::get)
+        .build()
+    );
+
+    // ============ STATE ============
+    private int timer = 0;
+    private boolean charging = false;
+    private boolean exploding = false;
+    private final Random random = new Random();
 
     public AnchorMacro() {
-        super(GlazedAddon.pvp, "anchor-macro", "Automatically charges and explodes respawn anchors.");
-    }
-
-    @Override
-    public void onActivate() {
-        resetCounters();
-        hasPlacedGlowstone = false;
-        hasExplodedAnchor = false;
-        lastBlockHitResult = null;
-    }
-
-    @Override
-    public void onDeactivate() {
-        resetCounters();
-        hasPlacedGlowstone = false;
-        hasExplodedAnchor = false;
-        lastBlockHitResult = null;
-    }
-
-    private void resetCounters() {
-        keybindCounter = 0;
-        glowstoneDelayCounter = 0;
-        explodeDelayCounter = 0;
+        super(GlazedAddon.pvp, "anchor-macro", "Auto charge and explode anchors - undetectable");
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.currentScreen != null) {
+        if (mc.player == null || mc.world == null) return;
+
+        if (timer > 0) {
+            timer--;
             return;
         }
-        if (isShieldOrFoodActive()) {
+
+        if (!(mc.crosshairTarget instanceof BlockHitResult bhr)) return;
+
+        if (!mc.world.getBlockState(bhr.getBlockPos()).isOf(Blocks.RESPAWN_ANCHOR)) return;
+
+        // Check if holding right click
+        if (!mc.options.useKey.isPressed()) {
+            charging = false;
+            exploding = false;
             return;
         }
-        if (KeyUtils.isKeyPressed(1)) { // Right mouse button
-            handleAnchorInteraction();
+
+        handleAnchor(bhr);
+    }
+
+    private void handleAnchor(BlockHitResult bhr) {
+        int chargeLevel = getChargeLevel(bhr.getBlockPos());
+
+        if (chargeLevel < 4) {
+            // Needs charging
+            if (!charging) {
+                startCharging(bhr);
+            } else {
+                continueCharging(bhr);
+            }
         } else {
-            // Reset state when key is released
-            hasPlacedGlowstone = false;
-            hasExplodedAnchor = false;
-            lastBlockHitResult = null;
-        }
-    }
-
-    private boolean isShieldOrFoodActive() {
-        final boolean isFood = mc.player.getMainHandStack().getItem().getComponents().contains(DataComponentTypes.FOOD) ||
-            mc.player.getOffHandStack().getItem().getComponents().contains(DataComponentTypes.FOOD);
-        final boolean isShield = mc.player.getMainHandStack().getItem() instanceof ShieldItem ||
-            mc.player.getOffHandStack().getItem() instanceof ShieldItem;
-        final boolean isRightClickPressed = GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), 1) == 1;
-        return (isFood || isShield) && isRightClickPressed;
-    }
-
-    private void handleAnchorInteraction() {
-        if (!(mc.crosshairTarget instanceof BlockHitResult blockHitResult)) {
-            return;
-        }
-
-        lastBlockHitResult = blockHitResult;
-
-        if (!BlockUtil.isBlockAtPosition(blockHitResult.getBlockPos(), Blocks.RESPAWN_ANCHOR)) {
-            return;
-        }
-
-        mc.options.useKey.setPressed(false);
-
-        if (BlockUtil.isRespawnAnchorUncharged(blockHitResult.getBlockPos()) && !hasPlacedGlowstone) {
-            placeGlowstone(blockHitResult);
-        }
-        else if (BlockUtil.isRespawnAnchorCharged(blockHitResult.getBlockPos()) && !hasExplodedAnchor) {
-            explodeAnchor(blockHitResult);
-        }
-    }
-
-    private void placeGlowstone(final BlockHitResult blockHitResult) {
-        if (!mc.player.getMainHandStack().isOf(Items.GLOWSTONE)) {
-            if (keybindCounter < switchDelay.get().intValue()) {
-                ++keybindCounter;
-                return;
+            // Full - ready to explode
+            if (!exploding) {
+                startExploding(bhr);
+            } else {
+                explode(bhr);
             }
-            keybindCounter = 0;
-            swapToItem(Items.GLOWSTONE);
-            return;
-        }
-
-        if (mc.player.getMainHandStack().isOf(Items.GLOWSTONE)) {
-            if (glowstoneDelayCounter < glowstoneDelay.get().intValue()) {
-                ++glowstoneDelayCounter;
-                return;
-            }
-            glowstoneDelayCounter = 0;
-            BlockUtil.interactWithBlock(blockHitResult, true);
-            hasPlacedGlowstone = true;
         }
     }
 
-    private void explodeAnchor(final BlockHitResult blockHitResult) {
-        final int selectedSlot = totemSlot.get() - 1;
-
-        if (VersionUtil.getSelectedSlot(mc.player) != selectedSlot) {
-            if (keybindCounter < switchDelay.get().intValue()) {
-                ++keybindCounter;
-                return;
-            }
-            keybindCounter = 0;
-
-            VersionUtil.setSelectedSlot(mc.player, selectedSlot);
-            return;
-        }
-
-        if (VersionUtil.getSelectedSlot(mc.player) == selectedSlot) {
-            if (explodeDelayCounter < explodeDelay.get().intValue()) {
-                ++explodeDelayCounter;
-                return;
-            }
-            explodeDelayCounter = 0;
-            BlockUtil.interactWithBlock(blockHitResult, true);
-            hasExplodedAnchor = true;
+    private void startCharging(BlockHitResult bhr) {
+        if (autoSwitch.get() && !mc.player.getMainHandStack().isOf(Items.GLOWSTONE)) {
+            InvUtils.findInHotbar(Items.GLOWSTONE).swap(true);
+            setDelay(switchDelay.get());
+        } else {
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
+            mc.player.swingHand(Hand.MAIN_HAND);
+            charging = true;
+            setDelay(interactDelay.get());
         }
     }
 
-    private void swapToItem(net.minecraft.item.Item item) {
-        FindItemResult result = InvUtils.findInHotbar(item);
-        if (result.found()) {
-            mc.player.getInventory().setSelectedSlot(result.slot());
+    private void continueCharging(BlockHitResult bhr) {
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        
+        if (getChargeLevel(bhr.getBlockPos()) >= 4) {
+            charging = false;
+            exploding = true;
+        }
+        
+        setDelay(interactDelay.get());
+    }
+
+    private void startExploding(BlockHitResult bhr) {
+        // Switch to totem
+        InvUtils.swap(totemSlot.get() - 1, true);
+        setDelay(switchDelay.get());
+    }
+
+    private void explode(BlockHitResult bhr) {
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, bhr);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        exploding = false;
+        setDelay(interactDelay.get());
+    }
+
+    private int getChargeLevel(BlockPos pos) {
+        return mc.world.getBlockState(pos).get(net.minecraft.block.RespawnAnchorBlock.CHARGES);
+    }
+
+    private void setDelay(int base) {
+        if (humanize.get() && randomDelay.get() > 0) {
+            timer = base + random.nextInt(randomDelay.get() + 1);
+        } else {
+            timer = base;
         }
     }
 }
