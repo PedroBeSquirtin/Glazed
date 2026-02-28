@@ -11,6 +11,7 @@ import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;  // <-- ADD THIS IMPORT
 
 import java.util.Random;
 
