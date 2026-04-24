@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class TwirlDebug extends Module {
     
     public TwirlDebug() {
-        super(GlazedAddon.esp, "twirl-debug", Finding bases");
+        super(GlazedAddon.esp, "twirl-debug", "Finding bases");
     }
 
     // ============ ACTIVITY WEIGHTS ============
