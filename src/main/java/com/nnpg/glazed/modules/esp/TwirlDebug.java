@@ -1,3 +1,4 @@
+
 package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
@@ -27,7 +28,6 @@ import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
-import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
@@ -38,12 +38,13 @@ import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class TwirlDebug extends Module {
     
     public TwirlDebug() {
-        super(GlazedAddon.esp, "twirl-debug", "Finding bases");
+        super(GlazedAddon.esp, "twirl-debug", "Detects server-side player activity with color-coded highlighting");
     }
 
     // ============ ACTIVITY WEIGHTS ============
@@ -83,19 +84,12 @@ public class TwirlDebug extends Module {
     private static final double BLOCK_HIGHLIGHT_OFFSET = 0.05;
     
     // ============ COLORS (Light Blue to Dark Blue gradient) ============
-    // Low activity - Light Blue
-    private static final Color LOW_ACTIVITY_FILL = new Color(173, 216, 230, 100);  // Light Blue
+    private static final Color LOW_ACTIVITY_FILL = new Color(173, 216, 230, 100);
     private static final Color LOW_ACTIVITY_LINE = new Color(173, 216, 230, 200);
-    
-    // Medium activity - Medium Blue
     private static final Color MEDIUM_ACTIVITY_FILL = new Color(70, 130, 200, 140);
     private static final Color MEDIUM_ACTIVITY_LINE = new Color(70, 130, 200, 220);
-    
-    // High activity - Dark Blue
     private static final Color HIGH_ACTIVITY_FILL = new Color(0, 0, 139, 180);
     private static final Color HIGH_ACTIVITY_LINE = new Color(0, 0, 139, 255);
-    
-    // Extreme activity - Deep Blue
     private static final Color EXTREME_ACTIVITY_FILL = new Color(0, 0, 80, 200);
     private static final Color EXTREME_ACTIVITY_LINE = new Color(50, 100, 255, 255);
     
@@ -105,132 +99,53 @@ public class TwirlDebug extends Module {
     private final SettingGroup sgRender = settings.createGroup("Rendering");
     private final SettingGroup sgNotifications = settings.createGroup("Notifications");
     
-    // General settings
     private final Setting<Boolean> enableChunkHighlight = sgGeneral.add(new BoolSetting.Builder()
-        .name("chunk-highlight")
-        .description("Highlight entire chunks with activity")
-        .defaultValue(true)
-        .build()
-    );
+        .name("chunk-highlight").description("Highlight entire chunks with activity").defaultValue(true).build());
     
     private final Setting<Boolean> enableBlockHighlight = sgGeneral.add(new BoolSetting.Builder()
-        .name("block-highlight")
-        .description("Highlight individual active blocks")
-        .defaultValue(true)
-        .build()
-    );
+        .name("block-highlight").description("Highlight individual active blocks").defaultValue(true).build());
     
     private final Setting<Boolean> showHotspots = sgGeneral.add(new BoolSetting.Builder()
-        .name("show-hotspots")
-        .description("Only show areas with significant activity")
-        .defaultValue(false)
-        .build()
-    );
+        .name("show-hotspots").description("Only show areas with significant activity").defaultValue(false).build());
     
-    // Detection settings
     private final Setting<Boolean> detectRedstone = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-redstone")
-        .description("Detect redstone activity")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-redstone").description("Detect redstone activity").defaultValue(true).build());
     
     private final Setting<Boolean> detectContainers = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-containers")
-        .description("Detect chest, furnace, hopper activity")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-containers").description("Detect chest, furnace, hopper activity").defaultValue(true).build());
     
     private final Setting<Boolean> detectEntities = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-entities")
-        .description("Detect high entity concentrations")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-entities").description("Detect high entity concentrations").defaultValue(true).build());
     
     private final Setting<Boolean> detectServerPackets = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-server-packets")
-        .description("Detect server packet activity")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-server-packets").description("Detect server packet activity").defaultValue(true).build());
     
     private final Setting<Boolean> detectSounds = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-sounds")
-        .description("Detect in-game sounds (shows activity area)")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-sounds").description("Detect in-game sounds").defaultValue(true).build());
     
     private final Setting<Boolean> detectMachineActivity = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-machine-activity")
-        .description("Detect pistons, observers, comparators")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-machine-activity").description("Detect pistons, observers, comparators").defaultValue(true).build());
     
     private final Setting<Boolean> detectFarming = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-farming")
-        .description("Detect farming activities (crops, animals)")
-        .defaultValue(true)
-        .build()
-    );
+        .name("detect-farming").description("Detect farming activities").defaultValue(true).build());
     
-    private final Setting<Boolean> detectVillagers = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-villagers")
-        .description("Detect villager trading and breeding")
-        .defaultValue(true)
-        .build()
-    );
-    
-    // Render settings
     private final Setting<Boolean> showTracers = sgRender.add(new BoolSetting.Builder()
-        .name("show-tracers")
-        .description("Show tracers to high activity areas")
-        .defaultValue(false)
-        .build()
-    );
+        .name("show-tracers").description("Show tracers to high activity areas").defaultValue(false).build());
     
     private final Setting<Boolean> showActivityNumbers = sgRender.add(new BoolSetting.Builder()
-        .name("show-activity-numbers")
-        .description("Show activity level numbers")
-        .defaultValue(false)
-        .build()
-    );
+        .name("show-activity-numbers").description("Show activity level numbers").defaultValue(false).build());
     
     private final Setting<Double> tracerHeight = sgRender.add(new DoubleSetting.Builder()
-        .name("tracer-height")
-        .description("Height for tracer endpoints")
-        .defaultValue(70)
-        .min(0)
-        .max(256)
-        .build()
-    );
+        .name("tracer-height").description("Height for tracer endpoints").defaultValue(70).min(0).max(256).build());
     
-    // Notification settings
     private final Setting<Boolean> notifyHotspots = sgNotifications.add(new BoolSetting.Builder()
-        .name("notify-hotspots")
-        .description("Send chat notification when hotspot is found")
-        .defaultValue(true)
-        .build()
-    );
+        .name("notify-hotspots").description("Send chat notification when hotspot is found").defaultValue(true).build());
     
     private final Setting<Boolean> soundAlert = sgNotifications.add(new BoolSetting.Builder()
-        .name("sound-alert")
-        .description("Play sound when hotspot is found")
-        .defaultValue(true)
-        .build()
-    );
+        .name("sound-alert").description("Play sound when hotspot is found").defaultValue(true).build());
     
     private final Setting<Integer> notificationCooldown = sgNotifications.add(new IntSetting.Builder()
-        .name("notification-cooldown")
-        .description("Cooldown between notifications (seconds)")
-        .defaultValue(30)
-        .min(5)
-        .max(300)
-        .build()
-    );
+        .name("notification-cooldown").description("Cooldown between notifications (seconds)").defaultValue(30).min(5).max(300).build());
     
     // ============ DATA STRUCTURES ============
     private final Map<ChunkPos, ChunkActivity> chunkActivity = new ConcurrentHashMap<>();
@@ -239,8 +154,6 @@ public class TwirlDebug extends Module {
     private final Map<ChunkPos, Long> lastNotificationTime = new ConcurrentHashMap<>();
     private final Set<ChunkPos> activeHotspots = ConcurrentHashMap.newKeySet();
     private final List<SoundActivity> recentSounds = new CopyOnWriteArrayList<>();
-    
-    // Packet tracking
     private final Map<ChunkPos, AtomicInteger> packetCounts = new ConcurrentHashMap<>();
     private long lastCleanupTime = 0;
     
@@ -334,7 +247,6 @@ public class TwirlDebug extends Module {
         
         long currentTime = System.currentTimeMillis();
         
-        // Decay activity every 5 seconds
         if (currentTime - lastCleanupTime > 5000) {
             decayActivity();
             updateEntityCounts();
@@ -342,21 +254,16 @@ public class TwirlDebug extends Module {
             lastCleanupTime = currentTime;
         }
         
-        // Cleanup old sounds (older than 10 seconds)
         recentSounds.removeIf(s -> currentTime - s.timestamp > 10000);
-        
-        // Update player proximity detection
         updatePlayerProximity();
     }
     
     private void decayActivity() {
-        // Decay chunk activity
         chunkActivity.values().removeIf(activity -> {
             activity.decay();
             return !activity.isActive();
         });
         
-        // Decay block activity
         blockActivity.values().removeIf(activity -> {
             long age = System.currentTimeMillis() - activity.lastUpdate;
             if (age > 30000) return true;
@@ -364,7 +271,6 @@ public class TwirlDebug extends Module {
             return activity.activityLevel == 0 && age > 15000;
         });
         
-        // Decay packet counts
         packetCounts.values().forEach(count -> {
             int newCount = count.get() / 2;
             count.set(newCount);
@@ -383,17 +289,15 @@ public class TwirlDebug extends Module {
             ChunkPos chunkPos = entity.getChunkPos();
             int count = entityCounts.getOrDefault(chunkPos, 0);
             
-            // Weight different entity types
             int weight = 1;
             if (entity instanceof MobEntity) weight = 3;
             else if (entity instanceof PassiveEntity) weight = 2;
-            else if (entity instanceof ItemEntity) weight = 4; // Items on ground = high suspicion
-            else if (entity instanceof PlayerEntity) weight = 10; // Players = highest suspicion
+            else if (entity instanceof ItemEntity) weight = 4;
+            else if (entity instanceof PlayerEntity) weight = 10;
             
             entityCounts.put(chunkPos, count + weight);
         }
         
-        // Add activity based on entity counts
         for (Map.Entry<ChunkPos, Integer> entry : entityCounts.entrySet()) {
             if (entry.getValue() > 5) {
                 int activity = Math.min(30, entry.getValue() * ENTITY_COUNT_BASE);
@@ -409,7 +313,6 @@ public class TwirlDebug extends Module {
             if (entry.getValue().activityLevel >= HOTSPOT_THRESHOLD) {
                 currentHotspots.add(entry.getKey());
                 
-                // Check if we should notify about new hotspot
                 if (notifyHotspots.get() && !activeHotspots.contains(entry.getKey())) {
                     long lastNotify = lastNotificationTime.getOrDefault(entry.getKey(), 0L);
                     long cooldownMs = notificationCooldown.get() * 1000L;
@@ -451,7 +354,6 @@ public class TwirlDebug extends Module {
         BlockPos playerPos = mc.player.getBlockPos();
         ChunkPos playerChunk = new ChunkPos(playerPos);
         
-        // Check nearby chunks for player activity
         for (int dx = -3; dx <= 3; dx++) {
             for (int dz = -3; dz <= 3; dz++) {
                 ChunkPos checkPos = new ChunkPos(playerChunk.x + dx, playerChunk.z + dz);
@@ -477,7 +379,6 @@ public class TwirlDebug extends Module {
         BlockActivity activity = blockActivity.computeIfAbsent(pos, k -> new BlockActivity(pos));
         activity.addActivity(amount);
         
-        // Also add to chunk activity
         ChunkPos chunkPos = new ChunkPos(pos);
         addChunkActivity(chunkPos, amount / 2, "block_activity");
     }
@@ -489,10 +390,6 @@ public class TwirlDebug extends Module {
         if (!detectServerPackets.get()) return;
         if (mc.world == null) return;
         
-        // Track packet frequency per chunk
-        String packetName = event.packet.getClass().getSimpleName();
-        
-        // Block updates
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
             BlockPos pos = packet.getPos();
             ChunkPos chunkPos = new ChunkPos(pos);
@@ -503,7 +400,6 @@ public class TwirlDebug extends Module {
                 addBlockActivity(pos, BLOCK_BREAK_PLACE);
             }
             
-            // Check what kind of block is being updated
             BlockState state = packet.getState();
             if (detectRedstone.get() && isRedstoneRelated(state.getBlock())) {
                 addBlockActivity(pos, REDSTONE_ACTIVITY_BASE);
@@ -511,36 +407,19 @@ public class TwirlDebug extends Module {
             }
         }
         
-        // Chunk delta updates (multiple block changes)
-        if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
-            // Use reflection to get the updated blocks
-            try {
-                var field = packet.getClass().getDeclaredField("updates");
-                field.setAccessible(true);
-                Object updates = field.get(packet);
-                if (updates != null) {
-                    addChunkActivity(new ChunkPos(mc.player.getBlockPos()), PACKET_FLOOD_ACTIVITY / 2, "chunk_delta");
-                }
-            } catch (Exception ignored) {}
+        if (event.packet instanceof ChunkDeltaUpdateS2CPacket) {
+            addChunkActivity(new ChunkPos(mc.player.getBlockPos()), PACKET_FLOOD_ACTIVITY / 2, "chunk_delta");
         }
         
-        // Entity spawns (could be player activity)
         if (event.packet instanceof EntitySpawnS2CPacket packet) {
-            try {
-                var entityTypeField = packet.getClass().getDeclaredField("entityTypeId");
-                entityTypeField.setAccessible(true);
-                int entityType = (int) entityTypeField.get(packet);
-                
-                BlockPos pos = new BlockPos(
-                    (int) packet.getX(),
-                    (int) packet.getY(),
-                    (int) packet.getZ()
-                );
-                addBlockActivity(pos, ENTITY_COUNT_BASE * 2);
-            } catch (Exception ignored) {}
+            BlockPos pos = new BlockPos(
+                (int) packet.getX(),
+                (int) packet.getY(),
+                (int) packet.getZ()
+            );
+            addBlockActivity(pos, ENTITY_COUNT_BASE * 2);
         }
         
-        // Block entity updates (chests, furnaces, etc.)
         if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
             BlockPos pos = packet.getPos();
             if (detectContainers.get()) {
@@ -556,8 +435,8 @@ public class TwirlDebug extends Module {
                block == Blocks.REDSTONE_TORCH ||
                block == Blocks.REDSTONE_BLOCK ||
                block == Blocks.REDSTONE_LAMP ||
-               block == Blocks.REDSTONE_REPEATER ||
-               block == Blocks.REDSTONE_COMPARATOR ||
+               block == Blocks.REPEATER ||
+               block == Blocks.COMPARATOR ||
                block == Blocks.LEVER ||
                block == Blocks.STONE_BUTTON ||
                block == Blocks.OAK_BUTTON ||
@@ -569,85 +448,7 @@ public class TwirlDebug extends Module {
                block == Blocks.NOTE_BLOCK;
     }
     
-    // ============ CHUNK SCANNING ============
-    
-    private void scanChunkForActivity(WorldChunk chunk) {
-        if (mc.world == null) return;
-        
-        ChunkPos pos = chunk.getPos();
-        
-        // Scan blocks in chunk
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) {
-                for (int y = mc.world.getBottomY(); y <= mc.world.getTopYInclusive(); y++) {
-                    BlockPos blockPos = new BlockPos(pos.getStartX() + x, y, pos.getStartZ() + z);
-                    BlockState state = mc.world.getBlockState(blockPos);
-                    Block block = state.getBlock();
-                    
-                    // Detect redstone components
-                    if (detectRedstone.get() && isRedstoneRelated(block)) {
-                        // Check if redstone is powered
-                        if (block == Blocks.REDSTONE_WIRE) {
-                            int power = state.get(RedstoneWireBlock.POWER);
-                            if (power > 0) {
-                                int activity = REDSTONE_ACTIVITY_BASE + (power * REDSTONE_FLICKER_BONUS / 15);
-                                addBlockActivity(blockPos, activity);
-                            }
-                        } else {
-                            addBlockActivity(blockPos, REDSTONE_ACTIVITY_BASE);
-                        }
-                    }
-                    
-                    // Detect containers
-                    if (detectContainers.get()) {
-                        BlockEntity blockEntity = mc.world.getBlockEntity(blockPos);
-                        if (blockEntity instanceof ChestBlockEntity ||
-                            blockEntity instanceof FurnaceBlockEntity ||
-                            blockEntity instanceof HopperBlockEntity) {
-                            addBlockActivity(blockPos, CHEST_OPEN_ACTIVITY / 2);
-                        }
-                    }
-                    
-                    // Detect machine activity
-                    if (detectMachineActivity.get()) {
-                        if (block == Blocks.PISTON || block == Blocks.STICKY_PISTON) {
-                            addBlockActivity(blockPos, PISTON_ACTIVITY);
-                        }
-                        if (block == Blocks.OBSERVER) {
-                            addBlockActivity(blockPos, OBSERVER_ACTIVITY);
-                        }
-                        if (block == Blocks.COMPARATOR) {
-                            addBlockActivity(blockPos, COMPARATOR_ACTIVITY);
-                        }
-                    }
-                    
-                    // Detect farming
-                    if (detectFarming.get()) {
-                        if (isCrop(block)) {
-                            // Check if crop is fully grown
-                            if (isFullyGrown(state, block)) {
-                                addBlockActivity(blockPos, FARMING_ACTIVITY);
-                            }
-                        }
-                    }
-                    
-                    // Detect high-value blocks
-                    if (block == Blocks.BEACON) {
-                        addBlockActivity(blockPos, BEACON_ACTIVITY);
-                    }
-                    if (block == Blocks.CONDUIT) {
-                        addBlockActivity(blockPos, CONDUIT_ACTIVITY);
-                    }
-                    if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL) {
-                        addBlockActivity(blockPos, PORTAL_ACTIVITY);
-                    }
-                    if (block == Blocks.SPAWNER) {
-                        addBlockActivity(blockPos, SPAWNER_ACTIVITY);
-                    }
-                }
-            }
-        }
-    }
+    // ============ CROP DETECTION ============
     
     private boolean isCrop(Block block) {
         return block == Blocks.WHEAT ||
@@ -679,82 +480,38 @@ public class TwirlDebug extends Module {
         return false;
     }
     
-    // ============ SOUND DETECTION ============
-    
-    @EventHandler
-    private void onSoundPlayed(net.minecraft.client.sound.SoundInstance sound) {
-        if (!detectSounds.get()) return;
-        if (mc.player == null) return;
-        
-        // Try to get position of sound
-        try {
-            var posField = sound.getClass().getDeclaredField("x");
-            posField.setAccessible(true);
-            double x = (double) posField.get(sound);
-            double y = (double) sound.getClass().getDeclaredField("y").get(sound);
-            double z = (double) sound.getClass().getDeclaredField("z").get(sound);
-            
-            BlockPos soundPos = new BlockPos((int) x, (int) y, (int) z);
-            float volume = sound.getVolume();
-            int activity = SOUND_ACTIVITY + (int)(volume * 10);
-            
-            // Add sound activity
-            recentSounds.add(new SoundActivity(soundPos, activity));
-            addBlockActivity(soundPos, activity);
-            
-            // Check for suspicious sounds (explosions, anvil, etc.)
-            String soundId = sound.getId().toString();
-            if (soundId.contains("explosion") || soundId.contains("tnt")) {
-                addBlockActivity(soundPos, 50); // Explosions = high suspicion
-            }
-            if (soundId.contains("anvil")) {
-                addBlockActivity(soundPos, 20); // Anvil use
-            }
-            
-        } catch (Exception ignored) {}
-    }
-    
     // ============ RENDERING ============
     
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.player == null || !isActive()) return;
         
-        // Render chunk highlights
         if (enableChunkHighlight.get()) {
             renderChunkActivity(event);
         }
         
-        // Render block highlights
         if (enableBlockHighlight.get()) {
             renderBlockActivity(event);
         }
         
-        // Render tracers
         if (showTracers.get()) {
             renderTracers(event);
-        }
-        
-        // Render activity numbers
-        if (showActivityNumbers.get()) {
-            renderActivityNumbers(event);
         }
     }
     
     private void renderChunkActivity(Render3DEvent event) {
+        // FIXED: Use getPos() that exists in this MC version
         Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
         
         for (Map.Entry<ChunkPos, ChunkActivity> entry : chunkActivity.entrySet()) {
             ChunkPos pos = entry.getKey();
             ChunkActivity activity = entry.getValue();
             
-            // Check render distance
             double chunkCenterX = pos.getStartX() + 8;
             double chunkCenterZ = pos.getStartZ() + 8;
             double distSq = Math.pow(chunkCenterX - cameraPos.x, 2) + Math.pow(chunkCenterZ - cameraPos.z, 2);
             if (distSq > RENDER_DISTANCE * RENDER_DISTANCE * 256) continue;
             
-            // Get color based on activity level
             Color fillColor, lineColor;
             float intensity = activity.activityLevel / (float) MAX_ACTIVITY;
             
@@ -772,7 +529,6 @@ public class TwirlDebug extends Module {
                 lineColor = LOW_ACTIVITY_LINE;
             }
             
-            // Apply intensity scaling to alpha
             Color scaledFill = new Color(
                 fillColor.r, fillColor.g, fillColor.b,
                 (int)(fillColor.a * intensity)
@@ -790,15 +546,14 @@ public class TwirlDebug extends Module {
     }
     
     private void renderBlockActivity(Render3DEvent event) {
+        // FIXED: Use getPos() that exists in this MC version
         Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
         
         for (BlockActivity activity : blockActivity.values()) {
-            // Check render distance
             double distSq = Math.pow(activity.pos.getX() + 0.5 - cameraPos.x, 2) +
                            Math.pow(activity.pos.getZ() + 0.5 - cameraPos.z, 2);
             if (distSq > RENDER_DISTANCE * RENDER_DISTANCE * 64) continue;
             
-            // Get color based on activity level
             Color fillColor, lineColor;
             float intensity = activity.activityLevel / (float) MAX_ACTIVITY;
             
@@ -855,27 +610,6 @@ public class TwirlDebug extends Module {
             }
             
             event.renderer.line(startPos.x, startPos.y, startPos.z, targetX, targetY, targetZ, color);
-        }
-    }
-    
-    private void renderActivityNumbers(Render3DEvent event) {
-        if (!showActivityNumbers.get()) return;
-        
-        for (Map.Entry<ChunkPos, ChunkActivity> entry : chunkActivity.entrySet()) {
-            ChunkPos pos = entry.getKey();
-            ChunkActivity activity = entry.getValue();
-            
-            if (activity.activityLevel < WARM_THRESHOLD / 2) continue;
-            
-            double x = pos.getStartX() + 8;
-            double z = pos.getStartZ() + 8;
-            double y = CHUNK_SLAB_Y_OFFSET + CHUNK_SLAB_HEIGHT + 0.5;
-            
-            String text = String.valueOf(activity.activityLevel);
-            Color color = activity.activityLevel >= HOTSPOT_THRESHOLD ? 
-                EXTREME_ACTIVITY_LINE : HIGH_ACTIVITY_LINE;
-            
-            event.renderer.text(text, x, y, z, true, color);
         }
     }
     
