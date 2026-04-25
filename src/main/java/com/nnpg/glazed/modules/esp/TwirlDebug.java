@@ -499,7 +499,7 @@ public class TwirlDebug extends Module {
     }
     
     private void renderChunkActivity(Render3DEvent event) {
-        Vec3d cameraPos = mc.player.getPos();
+        Vec3d cameraPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         
         for (Map.Entry<ChunkPos, ChunkActivity> entry : chunkActivity.entrySet()) {
             ChunkPos pos = entry.getKey();
@@ -544,7 +544,7 @@ public class TwirlDebug extends Module {
     }
     
     private void renderBlockActivity(Render3DEvent event) {
-        Vec3d cameraPos = mc.player.getPos();
+        Vec3d cameraPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         
         for (BlockActivity activity : blockActivity.values()) {
             double distSq = Math.pow(activity.pos.getX() + 0.5 - cameraPos.x, 2) +
