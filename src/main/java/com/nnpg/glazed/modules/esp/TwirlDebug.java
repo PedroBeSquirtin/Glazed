@@ -35,7 +35,6 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -51,17 +50,16 @@ public class TwirlDebug extends Module {
     // ============ BYPASS SETTINGS GROUP ============
     private final SettingGroup sgBypass = settings.createGroup("Anti-Cheat Bypass");
     
-    // Core bypasses
     private final Setting<Boolean> translationKeyBypass = sgBypass.add(new BoolSetting.Builder()
         .name("translation-key-bypass")
-        .description("Bypass DonutSMP's translation key detection (anvil/sign exploit)")
+        .description("Bypass DonutSMP's translation key detection")
         .defaultValue(true)
         .build()
     );
     
     private final Setting<Boolean> staggeredRendering = sgBypass.add(new BoolSetting.Builder()
         .name("staggered-rendering")
-        .description("Spread ESP rendering over multiple frames to bypass detection")
+        .description("Spread ESP rendering over multiple frames")
         .defaultValue(true)
         .build()
     );
@@ -130,15 +128,11 @@ public class TwirlDebug extends Module {
 
     // ============ ACTIVITY WEIGHTS ============
     private static final int REDSTONE_ACTIVITY_BASE = 10;
-    private static final int REDSTONE_FLICKER_BONUS = 5;
     private static final int CHEST_OPEN_ACTIVITY = 15;
-    private static final int FURNACE_ACTIVITY = 12;
-    private static final int HOPPER_ACTIVITY = 8;
     private static final int SPAWNER_ACTIVITY = 25;
     private static final int ENTITY_COUNT_BASE = 2;
     private static final int PLAYER_PROXIMITY_BASE = 30;
     private static final int PACKET_FLOOD_ACTIVITY = 15;
-    private static final int SOUND_ACTIVITY = 10;
     private static final int BLOCK_BREAK_PLACE = 15;
     private static final int PISTON_ACTIVITY = 12;
     private static final int BEACON_ACTIVITY = 20;
@@ -210,7 +204,6 @@ public class TwirlDebug extends Module {
     // ============ BYPASS STATE ============
     private boolean bypassActive = false;
     private final AtomicBoolean translationBypassApplied = new AtomicBoolean(false);
-    private int renderFrameCounter = 0;
     private long lastRenderTime = 0;
     private int currentRenderIndex = 0;
     private List<Map.Entry<ChunkPos, ChunkActivity>> cachedChunkList = new ArrayList<>();
@@ -253,7 +246,7 @@ public class TwirlDebug extends Module {
                 .orElse("Unknown");
         }
         
-        Color getColor(boolean pulse) {
+        Color getColor() {
             float intensity = activityLevel / (float) MAX_ACTIVITY;
             if (activityLevel >= HOTSPOT_THRESHOLD) {
                 return new Color(EXTREME_ACTIVITY_FILL.r, EXTREME_ACTIVITY_FILL.g, EXTREME_ACTIVITY_FILL.b,
@@ -300,7 +293,6 @@ public class TwirlDebug extends Module {
         if (bypassActive) return;
         
         try {
-            // Bypass 1: Translation key detection bypass
             if (translationKeyBypass.get() && !translationBypassApplied.get()) {
                 if (mc.getNetworkHandler() != null) {
                     try {
@@ -314,7 +306,6 @@ public class TwirlDebug extends Module {
                 }
             }
             
-            // Bypass 2: Anti-ESP hook bypass via reflection
             if (antiESPHook.get()) {
                 try {
                     Class<?> rendererClass = Class.forName("net.minecraft.client.render.WorldRenderer");
@@ -331,20 +322,19 @@ public class TwirlDebug extends Module {
             }
             
             bypassActive = true;
-            
-        } catch (Exception e) {
-            // Silent fail - don't alert anti-cheat
-        }
+        } catch (Exception ignored) {}
     }
     
+    // FIXED: Removed LookOnly class - using simple packet instead
     private void sendFakeMovementPacket() {
         if (!fakeMovementPackets.get() || mc.player == null) return;
-        if (mc.player.age % 60 != 0) return; // Every 3 seconds
+        if (mc.player.age % 60 != 0) return;
         
-        // Send tiny movement that doesn't actually move - confuses anti-exploit
-        PlayerMoveC2SPacket.LookOnly packet = new PlayerMoveC2SPacket.LookOnly(
-            mc.player.getYaw() + 0.001f,
-            mc.player.getPitch() + 0.001f,
+        // Send a simple position update packet (barely noticeable)
+        PlayerMoveC2SPacket.PositionAndOnGround packet = new PlayerMoveC2SPacket.PositionAndOnGround(
+            mc.player.getX() + 0.0001,
+            mc.player.getY(),
+            mc.player.getZ() + 0.0001,
             mc.player.isOnGround()
         );
         
@@ -365,7 +355,6 @@ public class TwirlDebug extends Module {
         if (mc.world == null) return;
         clearData();
         applyBypasses();
-        renderFrameCounter = 0;
         currentRenderIndex = 0;
         lastRenderTime = 0;
         cachedChunkList.clear();
@@ -397,10 +386,8 @@ public class TwirlDebug extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
         
-        // Send fake movement packets to confuse anti-exploit
         sendFakeMovementPacket();
         
-        // Slow down scanning in low profile mode
         if (lowProfileScan.get()) {
             slowScanCounter++;
             if (slowScanCounter % scanIntervalTicks.get() != 0) return;
@@ -483,7 +470,7 @@ public class TwirlDebug extends Module {
                 
                 if (!noNotifications.get() && notifyHotspots.get() && !activeHotspots.contains(entry.getKey())) {
                     long lastNotify = lastNotificationTime.getOrDefault(entry.getKey(), 0L);
-                    long cooldownMs = 30000; // 30 second cooldown
+                    long cooldownMs = 30000;
                     
                     if (System.currentTimeMillis() - lastNotify > cooldownMs) {
                         notifyHotspot(entry.getKey(), entry.getValue());
@@ -594,7 +581,6 @@ public class TwirlDebug extends Module {
             }
         }
         
-        // Detect explosion from sound packet
         if (event.packet instanceof PlaySoundS2CPacket pkt && mc.player != null) {
             BlockPos pos = new BlockPos((int) pkt.getX(), (int) pkt.getY(), (int) pkt.getZ());
             addBlockActivity(pos, 15);
@@ -627,28 +613,22 @@ public class TwirlDebug extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null || !isActive()) return;
         
-        // Staggered rendering bypass
         if (staggeredRendering.get()) {
             long currentTime = System.currentTimeMillis();
             if (currentTime - lastRenderTime < renderDelayMs.get()) {
-                return; // Skip this frame
+                return;
             }
             lastRenderTime = currentTime;
         }
         
-        renderFrameCounter++;
-        
-        // Render chunk highlights with staggered rendering
         if (enableChunkHighlight.get() && !cachedChunkList.isEmpty()) {
             renderStaggeredChunks(event);
         }
         
-        // Render block highlights (limited per frame for stealth)
         if (enableBlockHighlight.get()) {
             renderStaggeredBlocks(event);
         }
         
-        // Render tracers (optional)
         if (showTracers.get()) {
             renderTracers(event);
         }
@@ -659,7 +639,6 @@ public class TwirlDebug extends Module {
         int start = currentRenderIndex;
         int end = Math.min(start + maxPerFrame, cachedChunkList.size());
         
-        // Choose render layer based on bypass setting
         double renderY = renderLayerBypass.get() ? CLOUD_LAYER_Y : CHUNK_SLAB_Y_OFFSET;
         
         for (int i = start; i < end; i++) {
@@ -669,7 +648,7 @@ public class TwirlDebug extends Module {
             
             if (showHotspots.get() && activity.activityLevel < HOTSPOT_THRESHOLD) continue;
             
-            Color fillColor = activity.getColor(false);
+            Color fillColor = activity.getColor();
             Color lineColor = activity.getLineColor();
             
             int startX = pos.getStartX();
@@ -688,28 +667,29 @@ public class TwirlDebug extends Module {
         }
     }
     
+    // FIXED: Variable name conflict resolved
     private void renderStaggeredBlocks(Render3DEvent event) {
         int rendered = 0;
         int maxBlocks = lowProfileScan.get() ? 25 : 100;
         
-        for (BlockActivity activity : blockActivity.values()) {
+        for (BlockActivity blockAct : blockActivity.values()) {
             if (rendered >= maxBlocks) break;
             
-            ChunkPos chunkPos = new ChunkPos(activity.pos);
-            ChunkActivity chunkActivity = chunkActivity.get(chunkPos);
+            ChunkPos chunkPos = new ChunkPos(blockAct.pos);
+            ChunkActivity chunkAct = chunkActivity.get(chunkPos);
             
             Color fillColor, lineColor;
-            if (chunkActivity != null) {
-                fillColor = chunkActivity.getColor(false);
-                lineColor = chunkActivity.getLineColor();
+            if (chunkAct != null) {
+                fillColor = chunkAct.getColor();
+                lineColor = chunkAct.getLineColor();
             } else {
                 fillColor = LOW_ACTIVITY_FILL;
                 lineColor = LOW_ACTIVITY_LINE;
             }
             
-            double x = activity.pos.getX() - BLOCK_HIGHLIGHT_OFFSET;
-            double y = activity.pos.getY() - BLOCK_HIGHLIGHT_OFFSET;
-            double z = activity.pos.getZ() - BLOCK_HIGHLIGHT_OFFSET;
+            double x = blockAct.pos.getX() - BLOCK_HIGHLIGHT_OFFSET;
+            double y = blockAct.pos.getY() - BLOCK_HIGHLIGHT_OFFSET;
+            double z = blockAct.pos.getZ() - BLOCK_HIGHLIGHT_OFFSET;
             double size = 1 + BLOCK_HIGHLIGHT_OFFSET * 2;
             
             event.renderer.box(x, y, z, x + size, y + size, z + size,
