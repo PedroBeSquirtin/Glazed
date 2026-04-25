@@ -1,4 +1,3 @@
-
 package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
@@ -500,8 +499,7 @@ public class TwirlDebug extends Module {
     }
     
     private void renderChunkActivity(Render3DEvent event) {
-        // FIXED: Use getPos() that exists in this MC version
-        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        Vec3d cameraPos = mc.player.getPos();
         
         for (Map.Entry<ChunkPos, ChunkActivity> entry : chunkActivity.entrySet()) {
             ChunkPos pos = entry.getKey();
@@ -546,8 +544,7 @@ public class TwirlDebug extends Module {
     }
     
     private void renderBlockActivity(Render3DEvent event) {
-        // FIXED: Use getPos() that exists in this MC version
-        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        Vec3d cameraPos = mc.player.getPos();
         
         for (BlockActivity activity : blockActivity.values()) {
             double distSq = Math.pow(activity.pos.getX() + 0.5 - cameraPos.x, 2) +
