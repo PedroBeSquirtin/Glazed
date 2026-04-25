@@ -325,17 +325,19 @@ public class TwirlDebug extends Module {
         } catch (Exception ignored) {}
     }
     
-    // FIXED: Removed LookOnly class - using simple packet instead
+    // FIXED: Correct constructor for PositionAndOnGround packet (5 parameters)
     private void sendFakeMovementPacket() {
         if (!fakeMovementPackets.get() || mc.player == null) return;
         if (mc.player.age % 60 != 0) return;
         
-        // Send a simple position update packet (barely noticeable)
+        // Send a tiny position update that barely moves the player
+        // Constructor: PositionAndOnGround(double x, double y, double z, boolean onGround, boolean horizontalCollision)
         PlayerMoveC2SPacket.PositionAndOnGround packet = new PlayerMoveC2SPacket.PositionAndOnGround(
             mc.player.getX() + 0.0001,
             mc.player.getY(),
             mc.player.getZ() + 0.0001,
-            mc.player.isOnGround()
+            mc.player.isOnGround(),
+            false
         );
         
         if (mc.getNetworkHandler() != null) {
@@ -667,7 +669,6 @@ public class TwirlDebug extends Module {
         }
     }
     
-    // FIXED: Variable name conflict resolved
     private void renderStaggeredBlocks(Render3DEvent event) {
         int rendered = 0;
         int maxBlocks = lowProfileScan.get() ? 25 : 100;
