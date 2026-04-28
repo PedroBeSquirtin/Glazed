@@ -1,4 +1,4 @@
-package com.nnpg.glazed.modules.debug;
+package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
