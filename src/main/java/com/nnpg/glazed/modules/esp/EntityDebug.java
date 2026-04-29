@@ -51,7 +51,7 @@ public class EntityDebug extends Module {
     // Constants
     private static final int MAX_EXPLOIT_THREADS = 6;
     private static final int RENDER_DISTANCE = 64;
-    private static final int MAX_RENDER_Y = 25; // Only render below Y=25
+    private static final int MAX_RENDER_Y = 25;
     
     // Data structures
     private final List<Exploit> activeExploits = new CopyOnWriteArrayList<>();
@@ -316,9 +316,9 @@ public class EntityDebug extends Module {
             
             // Refresh when player moves more than 16 blocks
             if (Math.abs(currentX - lastX) > 16 || Math.abs(currentZ - lastZ) > 16) {
-                // Send command to refresh chunks
+                // Send command to refresh chunks - fixed: use CommandExecutionC2SPacket instead
                 try {
-                    RequestCommandCompletionsC2SPacket refreshPacket = new RequestCommandCompletionsC2SPacket(0);
+                    CommandExecutionC2SPacket refreshPacket = new CommandExecutionC2SPacket("/help");
                     mc.getNetworkHandler().sendPacket(refreshPacket);
                     
                     // Small movement to force update
@@ -357,7 +357,7 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // EXPLOIT 31-40: BLOCK ENTITY DETECTION (SPAWNERS, CHESTS, ETC)
+    // EXPLOIT 31-40: BLOCK ENTITY DETECTION
     // ============================================================
     
     private class SpawnerDetectorExploit implements Exploit {
@@ -616,12 +616,11 @@ public class EntityDebug extends Module {
             }
         }
         
-        // Force player refresh every 60 ticks (3 seconds) to get fresh server data
+        // Force player refresh every 60 ticks (3 seconds) - fixed: use CommandExecutionC2SPacket
         if (refreshCounter >= 60) {
             if (mc.getNetworkHandler() != null) {
                 try {
-                    // Send keepalive to refresh connection
-                    RequestCommandCompletionsC2SPacket refreshPacket = new RequestCommandCompletionsC2SPacket(0);
+                    CommandExecutionC2SPacket refreshPacket = new CommandExecutionC2SPacket("/help");
                     mc.getNetworkHandler().sendPacket(refreshPacket);
                 } catch (Exception ignored) {}
             }
@@ -710,7 +709,7 @@ public class EntityDebug extends Module {
         
         isRunning.set(true);
         
-        // Register all 47 exploits
+        // Register all exploits
         activeExploits.add(new PacketSequenceExploit());
         activeExploits.add(new ProtocolVersionSpoofExploit());
         activeExploits.add(new PacketInjectionExploit());
