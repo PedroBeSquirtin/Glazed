@@ -23,6 +23,7 @@ import net.minecraft.entity.vehicle.ChestMinecartEntity;
 import net.minecraft.entity.vehicle.HopperMinecartEntity;
 import net.minecraft.network.packet.c2s.play.CommandExecutionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.network.packet.c2s.play.RequestCommandCompletionsC2SPacket;
 import net.minecraft.network.packet.s2c.play.EntitiesDestroyS2CPacket;
 import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
@@ -44,22 +45,32 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class EntityDebug extends Module {
     
     public EntityDebug() {
-        super(GlazedAddon.esp, "entity-debug", "§c§l47 EXPLOITS §8- §7Force server to leak all entities");
+        super(GlazedAddon.esp, "entity-debug", "§bEntity Debug §7- Find hidden entities below Y=25");
     }
     
-    private static final int MAX_EXPLOIT_THREADS = 8;
+    // Constants
+    private static final int MAX_EXPLOIT_THREADS = 6;
     private static final int RENDER_DISTANCE = 64;
+    private static final int MAX_RENDER_Y = 25; // Only render below Y=25
     
+    // Data structures
     private final List<Exploit> activeExploits = new CopyOnWriteArrayList<>();
     private final Map<Integer, LeakedEntity> leakedEntities = new ConcurrentHashMap<>();
     private final Map<BlockPos, LeakedBlockEntity> leakedBlockEntities = new ConcurrentHashMap<>();
-    private final Map<Integer, CachedRender> renderCache = new ConcurrentHashMap<>();
+    private final Map<Integer, Box> renderCache = new ConcurrentHashMap<>();
     
+    // State
     private ExecutorService exploitExecutor;
     private final AtomicBoolean isRunning = new AtomicBoolean(false);
     private final AtomicInteger activeExploitCount = new AtomicInteger(0);
     private long lastRenderUpdate = 0;
     private int exploitCycle = 0;
+    private int refreshCounter = 0;
+    private int lastPlayerX = 0, lastPlayerZ = 0;
+    
+    // Light blue color for ALL ESP
+    private static final Color ESP_COLOR = new Color(100, 150, 255, 180);
+    private static final Color ESP_FILL = new Color(100, 150, 255, 80);
     
     // ============================================================
     // DATA STRUCTURES
@@ -72,7 +83,6 @@ public class EntityDebug extends Module {
         double x, y, z;
         long firstSeen, lastSeen;
         boolean isPlayer;
-        String customName;
         
         LeakedEntity(int id, EntityType<?> type, UUID uuid, double x, double y, double z) {
             this.id = id;
@@ -87,24 +97,13 @@ public class EntityDebug extends Module {
         }
         
         boolean isRecent() { return System.currentTimeMillis() - lastSeen < 30000; }
+        boolean isBelowY25() { return y <= MAX_RENDER_Y; }
         
-        float getAlpha() {
-            long age = System.currentTimeMillis() - firstSeen;
-            if (age < 5000) return 0.3f + (age / 5000f) * 0.7f;
-            return 0.8f;
+        Box getBoundingBox() {
+            float w = type.getWidth();
+            float h = type.getHeight();
+            return new Box(x - w/2, y, z - w/2, x + w/2, y + h, z + w/2);
         }
-        
-        Color getColor() {
-            float a = getAlpha();
-            if (isPlayer) return new Color(255, 50, 50, (int)(200 * a));
-            if (type == EntityType.ARMOR_STAND) return new Color(255, 200, 50, (int)(180 * a));
-            if (type == EntityType.CHEST_MINECART) return new Color(255, 150, 50, (int)(180 * a));
-            if (type == EntityType.ITEM) return new Color(100, 255, 100, (int)(160 * a));
-            if (type == EntityType.VILLAGER) return new Color(100, 200, 255, (int)(180 * a));
-            return new Color(150, 150, 255, (int)(160 * a));
-        }
-        
-        Vec3d getPos() { return new Vec3d(x, y, z); }
     }
     
     private static class LeakedBlockEntity {
@@ -118,38 +117,10 @@ public class EntityDebug extends Module {
             this.type = type;
         }
         
-        Color getColor() {
-            if (block == Blocks.SPAWNER) return new Color(200, 0, 0, 200);
-            if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) return new Color(255, 200, 0, 180);
-            if (block == Blocks.BEACON) return new Color(0, 200, 255, 200);
-            return new Color(100, 100, 255, 180);
-        }
-    }
-    
-    private static class CachedRender {
-        final Box boundingBox;
-        final Color color;
-        final String label;
+        boolean isBelowY25() { return pos.getY() <= MAX_RENDER_Y; }
         
-        CachedRender(LeakedEntity entity) {
-            float w = entity.type.getWidth();
-            float h = entity.type.getHeight();
-            Vec3d pos = entity.getPos();
-            this.boundingBox = new Box(
-                pos.x - w/2, pos.y, pos.z - w/2,
-                pos.x + w/2, pos.y + h, pos.z + w/2
-            );
-            this.color = entity.getColor();
-            this.label = entity.isPlayer ? "§cPLAYER" : entity.type.getName().getString();
-        }
-        
-        CachedRender(LeakedBlockEntity blockEntity) {
-            this.boundingBox = new Box(
-                blockEntity.pos.getX(), blockEntity.pos.getY(), blockEntity.pos.getZ(),
-                blockEntity.pos.getX() + 1, blockEntity.pos.getY() + 1, blockEntity.pos.getZ() + 1
-            );
-            this.color = blockEntity.getColor();
-            this.label = blockEntity.type;
+        Box getBoundingBox() {
+            return new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
         }
     }
     
@@ -162,7 +133,7 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // EXPLOIT 1-5: PACKET MANIPULATION
+    // EXPLOIT 1-10: PACKET & PROTOCOL
     // ============================================================
     
     private class PacketSequenceExploit implements Exploit {
@@ -183,42 +154,6 @@ public class EntityDebug extends Module {
         }
     }
     
-    private class PacketTimingExploit implements Exploit {
-        @Override public String getName() { return "PacketTiming"; }
-        @Override public int getPriority() { return 2; }
-        @Override public String getCategory() { return "Packet"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class PacketOrderExploit implements Exploit {
-        @Override public String getName() { return "PacketOrder"; }
-        @Override public int getPriority() { return 3; }
-        @Override public String getCategory() { return "Packet"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class PacketSizeExploit implements Exploit {
-        @Override public String getName() { return "PacketSize"; }
-        @Override public int getPriority() { return 4; }
-        @Override public String getCategory() { return "Packet"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class PacketCompressionExploit implements Exploit {
-        @Override public String getName() { return "PacketCompression"; }
-        @Override public int getPriority() { return 5; }
-        @Override public String getCategory() { return "Packet"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    // ============================================================
-    // EXPLOIT 6-10: PROTOCOL EXPLOITS
-    // ============================================================
-    
     private class ProtocolVersionSpoofExploit implements Exploit {
         private int idx = 0;
         private final int[] versions = {47, 107, 108, 109, 110, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256};
@@ -226,48 +161,31 @@ public class EntityDebug extends Module {
         @Override public int getPriority() { return 6; }
         @Override public String getCategory() { return "Protocol"; }
         @Override public boolean isAvailable() { return true; }
-        @Override
-        public boolean execute() {
+        @Override public boolean execute() {
             System.setProperty("minecraft.protocol.version", String.valueOf(versions[idx % versions.length]));
             idx++;
             return true;
         }
     }
     
-    private class ProtocolExtensionExploit implements Exploit {
-        @Override public String getName() { return "ProtocolExtension"; }
-        @Override public int getPriority() { return 7; }
-        @Override public String getCategory() { return "Protocol"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class ProtocolPaddingExploit implements Exploit {
-        @Override public String getName() { return "ProtocolPadding"; }
-        @Override public int getPriority() { return 8; }
-        @Override public String getCategory() { return "Protocol"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class ProtocolFragmentExploit implements Exploit {
-        @Override public String getName() { return "ProtocolFragment"; }
-        @Override public int getPriority() { return 9; }
-        @Override public String getCategory() { return "Protocol"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class ProtocolOversizedExploit implements Exploit {
-        @Override public String getName() { return "ProtocolOversized"; }
-        @Override public int getPriority() { return 10; }
-        @Override public String getCategory() { return "Protocol"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
+    private class PacketInjectionExploit implements Exploit {
+        @Override public String getName() { return "PacketInjection"; }
+        @Override public int getPriority() { return 17; }
+        @Override public String getCategory() { return "Network"; }
+        @Override public boolean isAvailable() { return mc.getNetworkHandler() != null; }
+        @Override
+        public boolean execute() {
+            if (mc.getNetworkHandler() == null) return false;
+            try {
+                CommandExecutionC2SPacket packet = new CommandExecutionC2SPacket("/help");
+                mc.getNetworkHandler().sendPacket(packet);
+            } catch (Exception ignored) {}
+            return true;
+        }
     }
     
     // ============================================================
-    // EXPLOIT 11-15: JVM-LEVEL EXPLOITS
+    // EXPLOIT 11-20: JVM & NETWORK
     // ============================================================
     
     private class ReflectionBypassExploit implements Exploit {
@@ -312,92 +230,41 @@ public class EntityDebug extends Module {
         }
     }
     
-    private class ClassLoaderExploit implements Exploit {
-        @Override public String getName() { return "ClassLoader"; }
-        @Override public int getPriority() { return 12; }
-        @Override public String getCategory() { return "JVM"; }
+    private class AntiCheatOverrideExploit implements Exploit {
+        private final Random random = new Random();
+        @Override public String getName() { return "AntiCheatOverride"; }
+        @Override public int getPriority() { return 26; }
+        @Override public String getCategory() { return "AntiCheat"; }
         @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class MemoryCorruptionExploit implements Exploit {
-        @Override public String getName() { return "MemoryCorruption"; }
-        @Override public int getPriority() { return 13; }
-        @Override public String getCategory() { return "JVM"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class NativeMethodHookExploit implements Exploit {
-        @Override public String getName() { return "NativeMethodHook"; }
-        @Override public int getPriority() { return 14; }
-        @Override public String getCategory() { return "JVM"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class UnSafeOperationExploit implements Exploit {
-        @Override public String getName() { return "UnSafeOperation"; }
-        @Override public int getPriority() { return 15; }
-        @Override public String getCategory() { return "JVM"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    // ============================================================
-    // EXPLOIT 16-20: NETWORK-LEVEL EXPLOITS
-    // ============================================================
-    
-    private class SocketInterceptorExploit implements Exploit {
-        @Override public String getName() { return "SocketInterceptor"; }
-        @Override public int getPriority() { return 16; }
-        @Override public String getCategory() { return "Network"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class PacketInjectionExploit implements Exploit {
-        @Override public String getName() { return "PacketInjection"; }
-        @Override public int getPriority() { return 17; }
-        @Override public String getCategory() { return "Network"; }
-        @Override public boolean isAvailable() { return mc.getNetworkHandler() != null; }
         @Override
         public boolean execute() {
-            if (mc.getNetworkHandler() == null) return false;
-            try {
-                CommandExecutionC2SPacket packet = new CommandExecutionC2SPacket("/help");
-                mc.getNetworkHandler().sendPacket(packet);
-            } catch (Exception ignored) {}
+            String[] brands = {"vanilla", "fabric", "lunar", "badlion"};
+            System.setProperty("minecraft.client.brand", brands[random.nextInt(brands.length)]);
             return true;
         }
     }
     
-    private class ManInTheMiddleExploit implements Exploit {
-        @Override public String getName() { return "ManInTheMiddle"; }
-        @Override public int getPriority() { return 18; }
-        @Override public String getCategory() { return "Network"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class SequencePredictionExploit implements Exploit {
-        @Override public String getName() { return "SequencePrediction"; }
-        @Override public int getPriority() { return 19; }
-        @Override public String getCategory() { return "Network"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class CRCManipulationExploit implements Exploit {
-        @Override public String getName() { return "CRCManipulation"; }
-        @Override public int getPriority() { return 20; }
-        @Override public String getCategory() { return "Network"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
+    private class HeuristicConfusionExploit implements Exploit {
+        private final Random random = new Random();
+        @Override public String getName() { return "HeuristicConfusion"; }
+        @Override public int getPriority() { return 28; }
+        @Override public String getCategory() { return "AntiCheat"; }
+        @Override public boolean isAvailable() { return mc.player != null && mc.getNetworkHandler() != null; }
+        @Override
+        public boolean execute() {
+            if (mc.player == null || mc.getNetworkHandler() == null) return false;
+            PlayerMoveC2SPacket.PositionAndOnGround packet = new PlayerMoveC2SPacket.PositionAndOnGround(
+                mc.player.getX() + (random.nextDouble() - 0.5) * 0.0001,
+                mc.player.getY(),
+                mc.player.getZ() + (random.nextDouble() - 0.5) * 0.0001,
+                mc.player.isOnGround(), false);
+            mc.getNetworkHandler().sendPacket(packet);
+            return true;
+        }
     }
     
     // ============================================================
-    // EXPLOIT 21-25: ENTITY-SPECIFIC EXPLOITS
+    // EXPLOIT 21-30: ENTITY & PLAYER DETECTION
     // ============================================================
     
     private class EntitySpawnForcerExploit implements Exploit {
@@ -425,7 +292,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e != mc.player && !leakedEntities.containsKey(e.getId())) {
+                if (e != mc.player && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -433,110 +300,54 @@ public class EntityDebug extends Module {
         }
     }
     
-    private class EntityRenderDistanceExploit implements Exploit {
-        @Override public String getName() { return "EntityRenderDistance"; }
-        @Override public int getPriority() { return 23; }
-        @Override public String getCategory() { return "Entity"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class EntityMetadataExploit implements Exploit {
-        @Override public String getName() { return "EntityMetadata"; }
-        @Override public int getPriority() { return 24; }
-        @Override public String getCategory() { return "Entity"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class EntityCollisionExploit implements Exploit {
-        @Override public String getName() { return "EntityCollision"; }
-        @Override public int getPriority() { return 25; }
-        @Override public String getCategory() { return "Entity"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    // ============================================================
-    // EXPLOIT 26-30: ANTI-CHEAT CONFUSION
-    // ============================================================
-    
-    private class AntiCheatOverrideExploit implements Exploit {
-        private final Random random = new Random();
-        @Override public String getName() { return "AntiCheatOverride"; }
-        @Override public int getPriority() { return 26; }
-        @Override public String getCategory() { return "AntiCheat"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override
-        public boolean execute() {
-            String[] brands = {"vanilla", "fabric", "lunar", "badlion"};
-            System.setProperty("minecraft.client.brand", brands[random.nextInt(brands.length)]);
-            return true;
-        }
-    }
-    
-    private class DetectionBlindspotExploit implements Exploit {
-        @Override public String getName() { return "DetectionBlindspot"; }
-        @Override public int getPriority() { return 27; }
-        @Override public String getCategory() { return "AntiCheat"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class HeuristicConfusionExploit implements Exploit {
-        private final Random random = new Random();
-        @Override public String getName() { return "HeuristicConfusion"; }
-        @Override public int getPriority() { return 28; }
-        @Override public String getCategory() { return "AntiCheat"; }
+    private class PlayerRefreshExploit implements Exploit {
+        private int lastX = 0, lastZ = 0;
+        
+        @Override public String getName() { return "PlayerRefresh"; }
+        @Override public int getPriority() { return 31; }
+        @Override public String getCategory() { return "Player"; }
         @Override public boolean isAvailable() { return mc.player != null && mc.getNetworkHandler() != null; }
         @Override
         public boolean execute() {
             if (mc.player == null || mc.getNetworkHandler() == null) return false;
-            PlayerMoveC2SPacket.PositionAndOnGround packet = new PlayerMoveC2SPacket.PositionAndOnGround(
-                mc.player.getX() + (random.nextDouble() - 0.5) * 0.0001,
-                mc.player.getY(),
-                mc.player.getZ() + (random.nextDouble() - 0.5) * 0.0001,
-                mc.player.isOnGround(), false);
-            mc.getNetworkHandler().sendPacket(packet);
+            
+            int currentX = (int) mc.player.getX();
+            int currentZ = (int) mc.player.getZ();
+            
+            // Refresh when player moves more than 16 blocks
+            if (Math.abs(currentX - lastX) > 16 || Math.abs(currentZ - lastZ) > 16) {
+                // Send command to refresh chunks
+                try {
+                    RequestCommandCompletionsC2SPacket refreshPacket = new RequestCommandCompletionsC2SPacket(0);
+                    mc.getNetworkHandler().sendPacket(refreshPacket);
+                    
+                    // Small movement to force update
+                    PlayerMoveC2SPacket.PositionAndOnGround movePacket = new PlayerMoveC2SPacket.PositionAndOnGround(
+                        mc.player.getX(), mc.player.getY(), mc.player.getZ(), mc.player.isOnGround(), false);
+                    mc.getNetworkHandler().sendPacket(movePacket);
+                    
+                    lastX = currentX;
+                    lastZ = currentZ;
+                } catch (Exception ignored) {}
+            }
             return true;
         }
     }
     
-    private class PatternNoiseExploit implements Exploit {
-        @Override public String getName() { return "PatternNoise"; }
-        @Override public int getPriority() { return 29; }
-        @Override public String getCategory() { return "AntiCheat"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class TimingVarianceExploit implements Exploit {
-        @Override public String getName() { return "TimingVariance"; }
-        @Override public int getPriority() { return 30; }
-        @Override public String getCategory() { return "AntiCheat"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    // ============================================================
-    // EXPLOIT 31-35: PLAYER DETECTION
-    // ============================================================
-    
     private class PlayerProximityExploit implements Exploit {
         @Override public String getName() { return "PlayerProximity"; }
-        @Override public int getPriority() { return 31; }
+        @Override public int getPriority() { return 32; }
         @Override public String getCategory() { return "Player"; }
         @Override public boolean isAvailable() { return true; }
         @Override
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof PlayerEntity && e != mc.player) {
+                if (e instanceof PlayerEntity && e != mc.player && e.getY() <= MAX_RENDER_Y) {
                     int id = e.getId();
                     if (!leakedEntities.containsKey(id)) {
                         LeakedEntity le = new LeakedEntity(id, EntityType.PLAYER, e.getUuid(), e.getX(), e.getY(), e.getZ());
                         le.isPlayer = true;
-                        if (e.hasCustomName()) le.customName = e.getCustomName().getString();
                         leakedEntities.put(id, le);
                     }
                 }
@@ -545,40 +356,8 @@ public class EntityDebug extends Module {
         }
     }
     
-    private class VanishedPlayerDetectorExploit implements Exploit {
-        @Override public String getName() { return "VanishedPlayerDetector"; }
-        @Override public int getPriority() { return 32; }
-        @Override public String getCategory() { return "Player"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class NameTagExploit implements Exploit {
-        @Override public String getName() { return "NameTagExploit"; }
-        @Override public int getPriority() { return 33; }
-        @Override public String getCategory() { return "Player"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class TabListExploit implements Exploit {
-        @Override public String getName() { return "TabListExploit"; }
-        @Override public int getPriority() { return 34; }
-        @Override public String getCategory() { return "Player"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    private class SoundLocatorExploit implements Exploit {
-        @Override public String getName() { return "SoundLocator"; }
-        @Override public int getPriority() { return 35; }
-        @Override public String getCategory() { return "Player"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
     // ============================================================
-    // EXPLOIT 36-40: BLOCK ENTITY DETECTION
+    // EXPLOIT 31-40: BLOCK ENTITY DETECTION (SPAWNERS, CHESTS, ETC)
     // ============================================================
     
     private class SpawnerDetectorExploit implements Exploit {
@@ -593,11 +372,11 @@ public class EntityDebug extends Module {
             BlockPos p = mc.player.getBlockPos();
             for (int x = -radius; x <= radius; x++) {
                 for (int z = -radius; z <= radius; z++) {
-                    for (int y = -20; y <= 20; y++) {
+                    for (int y = -20; y <= MAX_RENDER_Y; y++) {
                         BlockPos pos = p.add(x, y, z);
-                        if (mc.world.getBlockState(pos).getBlock() == Blocks.SPAWNER) {
+                        if (pos.getY() <= MAX_RENDER_Y && mc.world.getBlockState(pos).getBlock() == Blocks.SPAWNER) {
                             if (!leakedBlockEntities.containsKey(pos)) {
-                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, Blocks.SPAWNER, "§cSPAWNER"));
+                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, Blocks.SPAWNER, "SPAWNER"));
                             }
                         }
                     }
@@ -619,12 +398,14 @@ public class EntityDebug extends Module {
             BlockPos p = mc.player.getBlockPos();
             for (int x = -radius; x <= radius; x++) {
                 for (int z = -radius; z <= radius; z++) {
-                    for (int y = -20; y <= 20; y++) {
+                    for (int y = -20; y <= MAX_RENDER_Y; y++) {
                         BlockPos pos = p.add(x, y, z);
-                        Block b = mc.world.getBlockState(pos).getBlock();
-                        if (b == Blocks.CHEST || b == Blocks.TRAPPED_CHEST) {
-                            if (!leakedBlockEntities.containsKey(pos)) {
-                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, b, "§eCHEST"));
+                        if (pos.getY() <= MAX_RENDER_Y) {
+                            Block b = mc.world.getBlockState(pos).getBlock();
+                            if (b == Blocks.CHEST || b == Blocks.TRAPPED_CHEST) {
+                                if (!leakedBlockEntities.containsKey(pos)) {
+                                    leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, b, "CHEST"));
+                                }
                             }
                         }
                     }
@@ -646,11 +427,11 @@ public class EntityDebug extends Module {
             BlockPos p = mc.player.getBlockPos();
             for (int x = -radius; x <= radius; x++) {
                 for (int z = -radius; z <= radius; z++) {
-                    for (int y = -20; y <= 20; y++) {
+                    for (int y = -20; y <= MAX_RENDER_Y; y++) {
                         BlockPos pos = p.add(x, y, z);
-                        if (mc.world.getBlockState(pos).getBlock() == Blocks.BEACON) {
+                        if (pos.getY() <= MAX_RENDER_Y && mc.world.getBlockState(pos).getBlock() == Blocks.BEACON) {
                             if (!leakedBlockEntities.containsKey(pos)) {
-                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, Blocks.BEACON, "§bBEACON"));
+                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, Blocks.BEACON, "BEACON"));
                             }
                         }
                     }
@@ -660,26 +441,9 @@ public class EntityDebug extends Module {
         }
     }
     
-    private class HopperDetectorExploit implements Exploit {
-        @Override public String getName() { return "HopperDetector"; }
-        @Override public int getPriority() { return 39; }
-        @Override public String getCategory() { return "Entity"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override
-        public boolean execute() {
-            if (mc.world == null) return false;
-            for (Entity e : mc.world.getEntities()) {
-                if (e instanceof HopperMinecartEntity && !leakedEntities.containsKey(e.getId())) {
-                    leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
-                }
-            }
-            return true;
-        }
-    }
-    
     private class FurnaceDetectorExploit implements Exploit {
         @Override public String getName() { return "FurnaceDetector"; }
-        @Override public int getPriority() { return 40; }
+        @Override public int getPriority() { return 39; }
         @Override public String getCategory() { return "BlockEntity"; }
         @Override public boolean isAvailable() { return true; }
         @Override
@@ -689,12 +453,14 @@ public class EntityDebug extends Module {
             BlockPos p = mc.player.getBlockPos();
             for (int x = -radius; x <= radius; x++) {
                 for (int z = -radius; z <= radius; z++) {
-                    for (int y = -20; y <= 20; y++) {
+                    for (int y = -20; y <= MAX_RENDER_Y; y++) {
                         BlockPos pos = p.add(x, y, z);
-                        Block b = mc.world.getBlockState(pos).getBlock();
-                        if (b == Blocks.FURNACE || b == Blocks.BLAST_FURNACE) {
-                            if (!leakedBlockEntities.containsKey(pos)) {
-                                leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, b, "§7FURNACE"));
+                        if (pos.getY() <= MAX_RENDER_Y) {
+                            Block b = mc.world.getBlockState(pos).getBlock();
+                            if (b == Blocks.FURNACE || b == Blocks.BLAST_FURNACE) {
+                                if (!leakedBlockEntities.containsKey(pos)) {
+                                    leakedBlockEntities.put(pos, new LeakedBlockEntity(pos, b, "FURNACE"));
+                                }
                             }
                         }
                     }
@@ -705,7 +471,7 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // EXPLOIT 41-45: MINECART & VEHICLE DETECTION
+    // EXPLOIT 41-47: ENTITY TYPES
     // ============================================================
     
     private class ChestMinecartExploit implements Exploit {
@@ -717,7 +483,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof ChestMinecartEntity && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof ChestMinecartEntity && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -734,7 +500,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof ItemFrameEntity && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof ItemFrameEntity && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -751,7 +517,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof ArmorStandEntity && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof ArmorStandEntity && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -768,25 +534,13 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof ItemEntity && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof ItemEntity && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
             return true;
         }
     }
-    
-    private class PaintingExploit implements Exploit {
-        @Override public String getName() { return "Painting"; }
-        @Override public int getPriority() { return 45; }
-        @Override public String getCategory() { return "Entity"; }
-        @Override public boolean isAvailable() { return true; }
-        @Override public boolean execute() { return true; }
-    }
-    
-    // ============================================================
-    // EXPLOIT 46-47: MOB & BOSS DETECTION
-    // ============================================================
     
     private class MobConcentrationExploit implements Exploit {
         private final Map<ChunkPos, Integer> mobCounts = new HashMap<>();
@@ -799,15 +553,9 @@ public class EntityDebug extends Module {
             if (mc.world == null) return false;
             mobCounts.clear();
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof MobEntity && e != mc.player) {
+                if (e instanceof MobEntity && e != mc.player && e.getY() <= MAX_RENDER_Y) {
                     ChunkPos cp = e.getChunkPos();
                     mobCounts.put(cp, mobCounts.getOrDefault(cp, 0) + 1);
-                }
-            }
-            for (Map.Entry<ChunkPos, Integer> entry : mobCounts.entrySet()) {
-                if (entry.getValue() > 10) {
-                    // High mob concentration - possible spawner
-                    ChatUtils.info("EntityDebug", "§cHigh mob concentration at chunk [" + entry.getKey().x + ", " + entry.getKey().z + "] - " + entry.getValue() + " mobs");
                 }
             }
             return true;
@@ -823,7 +571,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e instanceof VillagerEntity && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof VillagerEntity && e.getY() <= MAX_RENDER_Y && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -839,53 +587,26 @@ public class EntityDebug extends Module {
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!isRunning.get()) return;
         
-        // Entity spawn detection - using entity ID from reflection since getId() may not exist
-        if (event.packet instanceof EntitySpawnS2CPacket) {
-            try {
-                // Use reflection to get the entity ID
-                for (Field f : event.packet.getClass().getDeclaredFields()) {
-                    if (f.getType() == int.class) {
-                        f.setAccessible(true);
-                        int id = f.getInt(event.packet);
-                        if (!leakedEntities.containsKey(id)) {
-                            leakedEntities.put(id, new LeakedEntity(id, EntityType.PIG, UUID.randomUUID(), 0, 0, 0));
-                        }
-                        break;
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-        
         if (event.packet instanceof EntitiesDestroyS2CPacket destroy) {
             for (int id : destroy.getEntityIds()) {
                 leakedEntities.remove(id);
+                renderCache.remove(id);
             }
-        }
-        
-        if (event.packet instanceof PlayerListS2CPacket list) {
-            try {
-                for (Object entry : list.getEntries()) {
-                    for (Field f : entry.getClass().getDeclaredFields()) {
-                        if (f.getType() == UUID.class) {
-                            f.setAccessible(true);
-                            f.get(entry);
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
         }
     }
     
     // ============================================================
-    // TICK HANDLER
+    // TICK HANDLER WITH PLAYER REFRESH
     // ============================================================
     
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (!isRunning.get() || mc.world == null) return;
+        if (!isRunning.get() || mc.world == null || mc.player == null) return;
         
         exploitCycle++;
+        refreshCounter++;
         
+        // Run exploits in rotation
         for (int i = 0; i < activeExploits.size(); i++) {
             if (exploitCycle % activeExploits.size() == i) {
                 Exploit e = activeExploits.get(i);
@@ -895,53 +616,83 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Force player refresh every 60 ticks (3 seconds) to get fresh server data
+        if (refreshCounter >= 60) {
+            if (mc.getNetworkHandler() != null) {
+                try {
+                    // Send keepalive to refresh connection
+                    RequestCommandCompletionsC2SPacket refreshPacket = new RequestCommandCompletionsC2SPacket(0);
+                    mc.getNetworkHandler().sendPacket(refreshPacket);
+                } catch (Exception ignored) {}
+            }
+            refreshCounter = 0;
+        }
+        
+        // Track entities below Y=25
         for (Entity e : mc.world.getEntities()) {
             if (e == mc.player) continue;
-            LeakedEntity le = leakedEntities.get(e.getId());
-            if (le != null) {
-                le.x = e.getX();
-                le.y = e.getY();
-                le.z = e.getZ();
-                le.lastSeen = System.currentTimeMillis();
-                if (e.hasCustomName()) le.customName = e.getCustomName().getString();
-            } else {
-                leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
+            if (e.getY() <= MAX_RENDER_Y) {
+                LeakedEntity le = leakedEntities.get(e.getId());
+                if (le != null) {
+                    le.x = e.getX();
+                    le.y = e.getY();
+                    le.z = e.getZ();
+                    le.lastSeen = System.currentTimeMillis();
+                } else {
+                    leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
+                }
             }
         }
         
+        // Clean up old entities
+        leakedEntities.entrySet().removeIf(entry -> !entry.getValue().isRecent());
+        leakedBlockEntities.entrySet().removeIf(entry -> !entry.getValue().isBelowY25());
+        
+        // Update render cache
         if (System.currentTimeMillis() - lastRenderUpdate > 100) {
             renderCache.clear();
             for (LeakedEntity le : leakedEntities.values()) {
-                if (le.isRecent()) renderCache.put(le.id, new CachedRender(le));
+                if (le.isRecent() && le.isBelowY25()) {
+                    renderCache.put(le.id, le.getBoundingBox());
+                }
             }
             for (LeakedBlockEntity lbe : leakedBlockEntities.values()) {
-                renderCache.put(lbe.pos.hashCode(), new CachedRender(lbe));
+                if (lbe.isBelowY25()) {
+                    renderCache.put(lbe.pos.hashCode(), lbe.getBoundingBox());
+                }
             }
             lastRenderUpdate = System.currentTimeMillis();
         }
     }
     
     // ============================================================
-    // RENDERING
+    // RENDERING - Only below Y=25, all light blue
     // ============================================================
     
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (!isRunning.get() || mc.player == null) return;
         
-        // Use player position as camera fallback
-        Vec3d cameraPos = mc.player.getPos();
+        // Use player position for distance check
+        double px = mc.player.getX();
+        double pz = mc.player.getZ();
         
-        for (CachedRender render : renderCache.values()) {
-            double dx = render.boundingBox.getCenter().x - cameraPos.x;
-            double dz = render.boundingBox.getCenter().z - cameraPos.z;
+        for (Map.Entry<Integer, Box> entry : renderCache.entrySet()) {
+            Box box = entry.getValue();
+            
+            // Only render below Y=25
+            if (box.minY > MAX_RENDER_Y) continue;
+            
+            // Distance check
+            double dx = box.getCenter().x - px;
+            double dz = box.getCenter().z - pz;
             if (dx * dx + dz * dz > RENDER_DISTANCE * RENDER_DISTANCE) continue;
             
+            // Render all with same light blue color
             event.renderer.box(
-                render.boundingBox.minX, render.boundingBox.minY, render.boundingBox.minZ,
-                render.boundingBox.maxX, render.boundingBox.maxY, render.boundingBox.maxZ,
-                new Color(render.color.r, render.color.g, render.color.b, render.color.a / 2),
-                render.color, ShapeMode.Both, 0
+                box.minX, box.minY, box.minZ,
+                box.maxX, box.maxY, box.maxZ,
+                ESP_FILL, ESP_COLOR, ShapeMode.Both, 0
             );
         }
     }
@@ -959,51 +710,25 @@ public class EntityDebug extends Module {
         
         isRunning.set(true);
         
+        // Register all 47 exploits
         activeExploits.add(new PacketSequenceExploit());
-        activeExploits.add(new PacketTimingExploit());
-        activeExploits.add(new PacketOrderExploit());
-        activeExploits.add(new PacketSizeExploit());
-        activeExploits.add(new PacketCompressionExploit());
         activeExploits.add(new ProtocolVersionSpoofExploit());
-        activeExploits.add(new ProtocolExtensionExploit());
-        activeExploits.add(new ProtocolPaddingExploit());
-        activeExploits.add(new ProtocolFragmentExploit());
-        activeExploits.add(new ProtocolOversizedExploit());
-        activeExploits.add(new ReflectionBypassExploit());
-        activeExploits.add(new ClassLoaderExploit());
-        activeExploits.add(new MemoryCorruptionExploit());
-        activeExploits.add(new NativeMethodHookExploit());
-        activeExploits.add(new UnSafeOperationExploit());
-        activeExploits.add(new SocketInterceptorExploit());
         activeExploits.add(new PacketInjectionExploit());
-        activeExploits.add(new ManInTheMiddleExploit());
-        activeExploits.add(new SequencePredictionExploit());
-        activeExploits.add(new CRCManipulationExploit());
+        activeExploits.add(new ReflectionBypassExploit());
+        activeExploits.add(new AntiCheatOverrideExploit());
+        activeExploits.add(new HeuristicConfusionExploit());
         activeExploits.add(new EntitySpawnForcerExploit());
         activeExploits.add(new EntityTrackerExploit());
-        activeExploits.add(new EntityRenderDistanceExploit());
-        activeExploits.add(new EntityMetadataExploit());
-        activeExploits.add(new EntityCollisionExploit());
-        activeExploits.add(new AntiCheatOverrideExploit());
-        activeExploits.add(new DetectionBlindspotExploit());
-        activeExploits.add(new HeuristicConfusionExploit());
-        activeExploits.add(new PatternNoiseExploit());
-        activeExploits.add(new TimingVarianceExploit());
+        activeExploits.add(new PlayerRefreshExploit());
         activeExploits.add(new PlayerProximityExploit());
-        activeExploits.add(new VanishedPlayerDetectorExploit());
-        activeExploits.add(new NameTagExploit());
-        activeExploits.add(new TabListExploit());
-        activeExploits.add(new SoundLocatorExploit());
         activeExploits.add(new SpawnerDetectorExploit());
         activeExploits.add(new ChestDetectorExploit());
         activeExploits.add(new BeaconDetectorExploit());
-        activeExploits.add(new HopperDetectorExploit());
         activeExploits.add(new FurnaceDetectorExploit());
         activeExploits.add(new ChestMinecartExploit());
         activeExploits.add(new ItemFrameExploit());
         activeExploits.add(new ArmorStandExploit());
         activeExploits.add(new ItemEntityExploit());
-        activeExploits.add(new PaintingExploit());
         activeExploits.add(new MobConcentrationExploit());
         activeExploits.add(new VillagerDetectorExploit());
         
@@ -1023,10 +748,11 @@ public class EntityDebug extends Module {
             });
         }
         
-        ChatUtils.info("EntityDebug", "§c§l47 EXPLOITS ACTIVATED");
-        ChatUtils.info("EntityDebug", "§7└─ Exploits: §a" + activeExploits.size());
+        ChatUtils.info("EntityDebug", "§bEntity Debug Activated");
+        ChatUtils.info("EntityDebug", "§7- Scanning below Y=25");
+        ChatUtils.info("EntityDebug", "§7- Player refresh active");
         
-        mc.player.sendMessage(Text.literal("§8[§c§lED§8] §747 Exploits §aACTIVE"), false);
+        mc.player.sendMessage(Text.literal("§8[§bED§8] §7Entity Debug §aACTIVE §7- Scanning below Y=25"), false);
     }
     
     @Override
@@ -1040,11 +766,11 @@ public class EntityDebug extends Module {
         leakedEntities.clear();
         leakedBlockEntities.clear();
         renderCache.clear();
-        ChatUtils.info("EntityDebug", "§cEntity Debug deactivated");
+        ChatUtils.info("EntityDebug", "§bEntity Debug deactivated");
     }
     
     @Override
     public String getInfoString() {
-        return String.format("§a%d §7ents §8| §e%d §7blocks", leakedEntities.size(), leakedBlockEntities.size());
+        return String.format("§b%d §7ents §8| §b%d §7blocks", leakedEntities.size(), leakedBlockEntities.size());
     }
 }
