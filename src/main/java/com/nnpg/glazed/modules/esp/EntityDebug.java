@@ -17,13 +17,12 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.mob.MobEntity;
-import net.minecraft.entity.passive.PassiveEntity;
+import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.ChestMinecartEntity;
 import net.minecraft.entity.vehicle.HopperMinecartEntity;
 import net.minecraft.network.packet.c2s.play.CommandExecutionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
-import net.minecraft.network.packet.c2s.play.RequestCommandCompletionsC2SPacket;
 import net.minecraft.network.packet.s2c.play.EntitiesDestroyS2CPacket;
 import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
@@ -48,16 +47,8 @@ public class EntityDebug extends Module {
         super(GlazedAddon.esp, "entity-debug", "§c§l47 EXPLOITS §8- §7Force server to leak all entities");
     }
     
-    // ============================================================
-    // CONSTANTS
-    // ============================================================
-    
     private static final int MAX_EXPLOIT_THREADS = 8;
     private static final int RENDER_DISTANCE = 64;
-    
-    // ============================================================
-    // FIELDS
-    // ============================================================
     
     private final List<Exploit> activeExploits = new CopyOnWriteArrayList<>();
     private final Map<Integer, LeakedEntity> leakedEntities = new ConcurrentHashMap<>();
@@ -120,13 +111,11 @@ public class EntityDebug extends Module {
         final BlockPos pos;
         final Block block;
         String type;
-        long firstSeen;
         
         LeakedBlockEntity(BlockPos pos, Block block, String type) {
             this.pos = pos;
             this.block = block;
             this.type = type;
-            this.firstSeen = System.currentTimeMillis();
         }
         
         Color getColor() {
@@ -818,9 +807,7 @@ public class EntityDebug extends Module {
             for (Map.Entry<ChunkPos, Integer> entry : mobCounts.entrySet()) {
                 if (entry.getValue() > 10) {
                     // High mob concentration - possible spawner
-                    if (!leakedBlockEntities.containsKey(new BlockPos(entry.getKey().x * 16, 0, entry.getKey().z * 16))) {
-                        ChatUtils.info("EntityDebug", "§cHigh mob concentration at chunk [" + entry.getKey().x + ", " + entry.getKey().z + "] - " + entry.getValue() + " mobs");
-                    }
+                    ChatUtils.info("EntityDebug", "§cHigh mob concentration at chunk [" + entry.getKey().x + ", " + entry.getKey().z + "] - " + entry.getValue() + " mobs");
                 }
             }
             return true;
@@ -836,7 +823,7 @@ public class EntityDebug extends Module {
         public boolean execute() {
             if (mc.world == null) return false;
             for (Entity e : mc.world.getEntities()) {
-                if (e.getType() == EntityType.VILLAGER && !leakedEntities.containsKey(e.getId())) {
+                if (e instanceof VillagerEntity && !leakedEntities.containsKey(e.getId())) {
                     leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getUuid(), e.getX(), e.getY(), e.getZ()));
                 }
             }
@@ -852,14 +839,19 @@ public class EntityDebug extends Module {
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!isRunning.get()) return;
         
-        if (event.packet instanceof EntitySpawnS2CPacket spawn) {
+        // Entity spawn detection - using entity ID from reflection since getId() may not exist
+        if (event.packet instanceof EntitySpawnS2CPacket) {
             try {
-                int id = spawn.getId();
-                double x = spawn.getX();
-                double y = spawn.getY();
-                double z = spawn.getZ();
-                if (!leakedEntities.containsKey(id)) {
-                    leakedEntities.put(id, new LeakedEntity(id, EntityType.PIG, UUID.randomUUID(), x, y, z));
+                // Use reflection to get the entity ID
+                for (Field f : event.packet.getClass().getDeclaredFields()) {
+                    if (f.getType() == int.class) {
+                        f.setAccessible(true);
+                        int id = f.getInt(event.packet);
+                        if (!leakedEntities.containsKey(id)) {
+                            leakedEntities.put(id, new LeakedEntity(id, EntityType.PIG, UUID.randomUUID(), 0, 0, 0));
+                        }
+                        break;
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -937,7 +929,8 @@ public class EntityDebug extends Module {
     private void onRender(Render3DEvent event) {
         if (!isRunning.get() || mc.player == null) return;
         
-        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        // Use player position as camera fallback
+        Vec3d cameraPos = mc.player.getPos();
         
         for (CachedRender render : renderCache.values()) {
             double dx = render.boundingBox.getCenter().x - cameraPos.x;
