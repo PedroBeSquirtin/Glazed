@@ -131,9 +131,9 @@ public class EntityDebug extends Module {
     
     private static class EntityData {
         final int id;
-        double x, y, z;
+        double y;
         long lastSeen;
-        EntityData(int id, double x, double y, double z) { this.id = id; this.x = x; this.y = y; this.z = z; this.lastSeen = System.currentTimeMillis(); }
+        EntityData(int id, double y) { this.id = id; this.y = y; this.lastSeen = System.currentTimeMillis(); }
         boolean isBelowY18() { return y <= MAX_DETECTION_Y; }
     }
     
@@ -218,8 +218,9 @@ public class EntityDebug extends Module {
             int chunkX = 0, chunkZ = 0;
             for (Field f : packet.getClass().getDeclaredFields()) {
                 f.setAccessible(true);
-                if (f.getName().equals("x")) chunkX = f.getInt(packet);
-                if (f.getName().equals("z")) chunkZ = f.getInt(packet);
+                String name = f.getName();
+                if (name.equals("x") || name.equals("field_1210")) chunkX = f.getInt(packet);
+                if (name.equals("z") || name.equals("field_1211")) chunkZ = f.getInt(packet);
             }
             ChunkPos pos = new ChunkPos(chunkX, chunkZ);
             chunkData.put(pos, System.currentTimeMillis());
@@ -265,9 +266,10 @@ public class EntityDebug extends Module {
     private void parseChestNBT(BlockPos pos, NbtCompound nbt) {
         ChestData data = chestData.computeIfAbsent(pos, k -> new ChestData(pos));
         try {
-            // Fixed: getList only takes String in 1.21.11 - no type parameter
-            NbtList items = nbt.getList("Items");
-            data.itemCount = items.size();
+            // FIXED: getList returns Optional<NbtList> in 1.21.11
+            nbt.getList("Items").ifPresent(items -> {
+                data.itemCount = items.size();
+            });
             data.lastSeen = System.currentTimeMillis();
             if (pos.getY() <= MAX_DETECTION_Y && data.itemCount > 0) {
                 ChatUtils.info("EntityDebug", "§eCHEST with " + data.itemCount + " items at Y=" + pos.getY());
@@ -335,7 +337,7 @@ public class EntityDebug extends Module {
                 if (block == Blocks.COMPARATOR) {
                     int output = getComparatorOutput(packet);
                     comparatorOutputs.put(pos, output);
-                    if (pos.getY() <= MAX_DETECTION_Y && output > 0) {
+                    if (pos.getY() <= MAX_DETECTION_Y) {
                         ChatUtils.info("EntityDebug", "§5COMPARATOR output " + output + " at Y=" + pos.getY());
                     }
                 }
@@ -417,14 +419,15 @@ public class EntityDebug extends Module {
             double y = 0;
             for (Field f : packet.getClass().getDeclaredFields()) {
                 f.setAccessible(true);
-                if (f.getName().equals("id")) id = f.getInt(packet);
+                String name = f.getName();
+                if (name.equals("id") || name.equals("field_1217")) id = f.getInt(packet);
                 if (f.getType() == double.class) {
                     double val = f.getDouble(packet);
                     if (y == 0) y = val;
                 }
             }
             if (id != -1 && y <= MAX_DETECTION_Y) {
-                entities.put(id, new EntityData(id, 0, y, 0));
+                entities.put(id, new EntityData(id, y));
                 ChatUtils.info("EntityDebug", "§dEntity at Y=" + (int)y);
             }
         } catch (Exception ignored) {}
@@ -455,7 +458,7 @@ public class EntityDebug extends Module {
             ChestData chest = chestData.get(below);
             int newOutput = 0;
             if (chest != null && chest.itemCount > 0) newOutput = Math.min(15, chest.itemCount);
-            if (comp.getValue() != newOutput) {
+            if (!comp.getValue().equals(newOutput)) {
                 comparatorOutputs.put(comp.getKey(), newOutput);
                 if (comp.getKey().getY() <= MAX_DETECTION_Y && newOutput > 0) {
                     ChatUtils.info("EntityDebug", "§5COMPARATOR output changed to " + newOutput + " at Y=" + comp.getKey().getY());
@@ -493,7 +496,8 @@ public class EntityDebug extends Module {
                     f.setAccessible(true);
                     Object state = f.get(packet);
                     for (Field f2 : state.getClass().getDeclaredFields()) {
-                        if (f2.getName().toLowerCase().contains("power")) {
+                        String name = f2.getName().toLowerCase();
+                        if (name.contains("power")) {
                             f2.setAccessible(true);
                             return f2.getInt(state);
                         }
@@ -511,7 +515,8 @@ public class EntityDebug extends Module {
                     f.setAccessible(true);
                     Object state = f.get(packet);
                     for (Field f2 : state.getClass().getDeclaredFields()) {
-                        if (f2.getName().toLowerCase().contains("output")) {
+                        String name = f2.getName().toLowerCase();
+                        if (name.contains("output")) {
                             f2.setAccessible(true);
                             return f2.getInt(state);
                         }
@@ -549,6 +554,7 @@ public class EntityDebug extends Module {
     private void updateRenderCache() {
         renderCache.clear();
         
+        // Spawners
         for (SpawnerData data : spawnerData.values()) {
             if (data.isBelowY18() && data.spawnsEntity != null) {
                 Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
@@ -556,6 +562,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Chests with items
         for (ChestData data : chestData.values()) {
             if (data.isBelowY18() && data.itemCount > 0) {
                 Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
@@ -563,6 +570,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Burning furnaces
         for (FurnaceData data : furnaceData.values()) {
             if (data.isBelowY18() && data.isBurning) {
                 Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
@@ -570,6 +578,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Beacons
         for (BeaconData data : beaconData.values()) {
             if (data.isBelowY18() && data.levels > 0) {
                 Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
@@ -577,6 +586,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Active redstone
         for (Map.Entry<BlockPos, Integer> redstone : redstonePowerLevels.entrySet()) {
             BlockPos pos = redstone.getKey();
             if (pos.getY() <= MAX_DETECTION_Y && redstoneLastUpdate.containsKey(pos) && 
@@ -586,6 +596,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Comparators with output
         for (Map.Entry<BlockPos, Integer> comp : comparatorOutputs.entrySet()) {
             if (comp.getKey().getY() <= MAX_DETECTION_Y && comp.getValue() > 0) {
                 Box box = new Box(comp.getKey().getX(), comp.getKey().getY(), comp.getKey().getZ(), comp.getKey().getX() + 1, comp.getKey().getY() + 1, comp.getKey().getZ() + 1);
@@ -593,6 +604,7 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Recent block events
         for (BlockEventData event : blockEvents.values()) {
             if (event.isRecent() && event.pos.getY() <= MAX_DETECTION_Y) {
                 Box box = new Box(event.pos.getX(), event.pos.getY(), event.pos.getZ(), event.pos.getX() + 1, event.pos.getY() + 1, event.pos.getZ() + 1);
@@ -600,9 +612,10 @@ public class EntityDebug extends Module {
             }
         }
         
+        // Entities below Y=18
         for (EntityData data : entities.values()) {
             if (data.isBelowY18() && System.currentTimeMillis() - data.lastSeen < 5000) {
-                Box box = new Box(data.x - 0.3, data.y, data.z - 0.3, data.x + 0.3, data.y + 1.8, data.z + 0.3);
+                Box box = new Box(0, data.y - 0.3, 0, 0.6, data.y + 1.8, 0.6);
                 renderCache.put(data.id, new RenderData(box, ENTITY_FILL, ENTITY_COLOR));
             }
         }
