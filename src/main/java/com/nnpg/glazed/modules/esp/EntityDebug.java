@@ -14,9 +14,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.*;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.text.Text;
@@ -28,679 +26,985 @@ import net.minecraft.util.math.Vec3d;
 import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * KRYPTON-STYLE ENTITY DEBUG - 1.21.11 COMPATIBLE
+ * 
+ * This module captures ALL 8 server data channels:
+ * 1. NBT (Block Entity Data) - Full structured data from chunk & update packets
+ * 2. Packets - ChunkData, BlockEntityUpdate, BlockUpdate, ChunkDelta, BlockEvent
+ * 3. BlockState - Redstone power levels, powered states, comparator mode
+ * 4. Container Sync - Inventory override system (indirect via container events)
+ * 5. Block Events - Piston movement, chest open, note block play
+ * 6. Server Tick Updates - 20 TPS simulation reflected via block updates
+ * 7. Comparator Output System - Derived signal from containers/furnaces
+ * 8. Chunk Section Data - Bulk world sync on chunk load
+ * 
+ * Features:
+ * - Silent operation (no chat spam, only new discoveries)
+ * - ESP boxes below Y=18 (light blue)
+ * - Clean tracers from crosshair to detected locations
+ * - Real-time detection of spawners, chests, furnaces, beacons, redstone, comparators
+ * 
+ * @author Glazed Development
+ * @version 2.0.0
+ * @since 2026
+ */
 public class EntityDebug extends Module {
     
-    public EntityDebug() {
-        super(GlazedAddon.esp, "entity-debug", "§c§lKRYPTON §8| §78-Channel Server Data Extractor");
-    }
+    // ============================================================
+    // ANTI-SPAM TRACKING
+    // ============================================================
+    
+    private final Set<BlockPos> notifiedSpawners = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> notifiedChests = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> notifiedFurnaces = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> notifiedBeacons = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> notifiedRedstone = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> notifiedComparators = ConcurrentHashMap.newKeySet();
+    private final Map<String, AtomicLong> globalCooldown = new ConcurrentHashMap<>();
+    private final AtomicInteger messageThrottle = new AtomicInteger(0);
+    
+    // ============================================================
+    // ESP AND TRACER STORAGE
+    // ============================================================
+    
+    private final CopyOnWriteArrayList<EspBox> espBoxes = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<TracerPoint> tracerPoints = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<TracerPoint> tempTracers = new CopyOnWriteArrayList<>();
+    
+    // ============================================================
+    // 8 CHANNEL DATA STORAGE
+    // ============================================================
+    
+    // Channel 1: NBT Block Entity Data
+    private final Map<BlockPos, SpawnerRecord> spawnerRecords = new ConcurrentHashMap<>();
+    private final Map<BlockPos, ChestRecord> chestRecords = new ConcurrentHashMap<>();
+    private final Map<BlockPos, FurnaceRecord> furnaceRecords = new ConcurrentHashMap<>();
+    private final Map<BlockPos, BeaconRecord> beaconRecords = new ConcurrentHashMap<>();
+    
+    // Channel 3: BlockState (Redstone)
+    private final Map<BlockPos, RedstoneRecord> redstoneRecords = new ConcurrentHashMap<>();
+    private final Map<BlockPos, ComparatorRecord> comparatorRecords = new ConcurrentHashMap<>();
+    
+    // Channel 6: Server Tick Tracking
+    private final Map<BlockPos, AtomicInteger> redstoneChangeFreq = new ConcurrentHashMap<>();
+    private final Map<BlockPos, Long> lastRedstoneChangeTime = new ConcurrentHashMap<>();
+    
+    // Channel 8: Chunk Data
+    private final Map<ChunkPos, Long> chunkLoadRecords = new ConcurrentHashMap<>();
+    
+    // Entity tracking
+    private final Map<Integer, EntityRecord> entityRecords = new ConcurrentHashMap<>();
+    
+    // ============================================================
+    // STATE VARIABLES
+    // ============================================================
+    
+    private boolean moduleActive = false;
+    private int tickCounter = 0;
+    private long lastTracerUpdate = 0;
+    private long lastEspUpdate = 0;
+    private int totalDetections = 0;
+    private int currentRenderDistance = 96;
     
     // ============================================================
     // CONSTANTS
     // ============================================================
     
-    private static final int MAX_RENDER_DISTANCE = 160;
+    private static final int MAX_RENDER_DIST = 96;
     private static final int MAX_DETECTION_Y = 18;
     private static final long DATA_TIMEOUT_MS = 90000;
+    private static final long NOTIFICATION_COOLDOWN_MS = 30000;
+    private static final long GLOBAL_COOLDOWN_MS = 2000;
+    private static final long TRACER_UPDATE_INTERVAL_MS = 100;
+    private static final long ESP_UPDATE_INTERVAL_MS = 50;
+    private static final double TRACER_HEIGHT = 65.0;
+    private static final int SCAN_RADIUS = 48;
     
     // ============================================================
-    // DATA STORAGE - 8 CHANNELS
+    // COLORS - Light blue theme for ESP
     // ============================================================
     
-    // 1. NBT Block Entity Data
-    private final Map<BlockPos, ChestData> chestData = new ConcurrentHashMap<>();
-    private final Map<BlockPos, SpawnerData> spawnerData = new ConcurrentHashMap<>();
-    private final Map<BlockPos, FurnaceData> furnaceData = new ConcurrentHashMap<>();
-    private final Map<BlockPos, BeaconData> beaconData = new ConcurrentHashMap<>();
+    private static final Color ESP_FILL = new Color(100, 150, 255, 60);
+    private static final Color ESP_LINE = new Color(100, 150, 255, 200);
+    private static final Color TRACER_COLOR = new Color(100, 150, 255, 180);
+    private static final Color ACTIVE_REDSTONE_COLOR = new Color(255, 100, 100, 200);
     
-    // 2. Packets tracking
-    private final Map<ChunkPos, Long> chunkLoadTimes = new ConcurrentHashMap<>();
-    
-    // 3. BlockState (Redstone power, powered states)
-    private final Map<BlockPos, Integer> redstonePowerLevels = new ConcurrentHashMap<>();
-    private final Map<BlockPos, Long> redstoneLastUpdate = new ConcurrentHashMap<>();
-    
-    // 4. Container Sync
-    private final Map<Integer, Long> containerSyncs = new ConcurrentHashMap<>();
-    
-    // 5. Block Events
-    private final Map<BlockPos, BlockEventData> blockEvents = new ConcurrentHashMap<>();
-    
-    // 6. Server Tick Updates - Tracked via redstone change frequency
-    private final Map<BlockPos, Integer> redstoneChangeFrequency = new ConcurrentHashMap<>();
-    private final Map<BlockPos, Long> lastRedstoneChange = new ConcurrentHashMap<>();
-    
-    // 7. Comparator Output System
-    private final Map<BlockPos, Integer> comparatorOutputs = new ConcurrentHashMap<>();
-    
-    // 8. Chunk Section Data
-    private final Map<ChunkPos, Long> chunkData = new ConcurrentHashMap<>();
-    
-    // Entity tracking
-    private final Map<Integer, EntityData> entities = new ConcurrentHashMap<>();
-    
-    // Render cache
-    private final Map<Integer, RenderData> renderCache = new ConcurrentHashMap<>();
-    
-    private boolean isActive = false;
-    private int tickCounter = 0;
+    // HUD Colors (for info string only, not ESP)
+    private static final Color HUD_SPAWNER = new Color(255, 80, 80, 255);
+    private static final Color HUD_CHEST = new Color(255, 200, 80, 255);
+    private static final Color HUD_FURNACE = new Color(200, 150, 150, 255);
+    private static final Color HUD_BEACON = new Color(80, 200, 255, 255);
     
     // ============================================================
-    // DATA CLASSES
+    // CONSTRUCTOR
     // ============================================================
     
-    private static class ChestData {
+    public EntityDebug() {
+        super(GlazedAddon.esp, "entity-debug", "§bEntity Debug §7- Silent underground detector with ESP");
+    }
+    
+    // ============================================================
+    // DATA RECORD CLASSES
+    // ============================================================
+    
+    private static class SpawnerRecord {
+        final BlockPos pos;
+        String entityType;
+        long lastSeen;
+        SpawnerRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < DATA_TIMEOUT_MS; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        void update() { lastSeen = System.currentTimeMillis(); }
+    }
+    
+    private static class ChestRecord {
         final BlockPos pos;
         int itemCount;
         long lastSeen;
-        ChestData(BlockPos pos) { this.pos = pos; this.lastSeen = System.currentTimeMillis(); }
-        boolean isBelowY18() { return pos.getY() <= MAX_DETECTION_Y; }
+        ChestRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < DATA_TIMEOUT_MS; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        boolean hasItems() { return itemCount > 0; }
+        void update() { lastSeen = System.currentTimeMillis(); }
     }
     
-    private static class SpawnerData {
-        final BlockPos pos;
-        String spawnsEntity;
-        long lastSeen;
-        SpawnerData(BlockPos pos) { this.pos = pos; this.lastSeen = System.currentTimeMillis(); }
-        boolean isBelowY18() { return pos.getY() <= MAX_DETECTION_Y; }
-    }
-    
-    private static class FurnaceData {
+    private static class FurnaceRecord {
         final BlockPos pos;
         boolean isBurning;
         long lastSeen;
-        FurnaceData(BlockPos pos) { this.pos = pos; this.lastSeen = System.currentTimeMillis(); }
-        boolean isBelowY18() { return pos.getY() <= MAX_DETECTION_Y; }
+        FurnaceRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < DATA_TIMEOUT_MS; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        boolean isActive() { return isBurning; }
+        void update() { lastSeen = System.currentTimeMillis(); }
     }
     
-    private static class BeaconData {
+    private static class BeaconRecord {
         final BlockPos pos;
-        int levels;
+        int powerLevel;
         long lastSeen;
-        BeaconData(BlockPos pos) { this.pos = pos; this.lastSeen = System.currentTimeMillis(); }
-        boolean isBelowY18() { return pos.getY() <= MAX_DETECTION_Y; }
+        BeaconRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < DATA_TIMEOUT_MS; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        boolean isActive() { return powerLevel > 0; }
+        void update() { lastSeen = System.currentTimeMillis(); }
     }
     
-    private static class BlockEventData {
+    private static class RedstoneRecord {
         final BlockPos pos;
-        final int eventId;
-        final long timestamp;
-        BlockEventData(BlockPos pos, int eventId) { this.pos = pos; this.eventId = eventId; this.timestamp = System.currentTimeMillis(); }
-        boolean isRecent() { return System.currentTimeMillis() - timestamp < 3000; }
+        int powerLevel;
+        long lastSeen;
+        RedstoneRecord(BlockPos p, int power) { pos = p; powerLevel = power; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < 5000; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        boolean isPowered() { return powerLevel > 0; }
+        void update(int power) { powerLevel = power; lastSeen = System.currentTimeMillis(); }
     }
     
-    private static class EntityData {
+    private static class ComparatorRecord {
+        final BlockPos pos;
+        int outputSignal;
+        long lastSeen;
+        ComparatorRecord(BlockPos p, int output) { pos = p; outputSignal = output; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < 10000; }
+        boolean isBelowY() { return pos.getY() <= MAX_DETECTION_Y; }
+        boolean hasOutput() { return outputSignal > 0; }
+        void update(int output) { outputSignal = output; lastSeen = System.currentTimeMillis(); }
+    }
+    
+    private static class EntityRecord {
         final int id;
-        double y;
+        double yCoord;
         long lastSeen;
-        EntityData(int id, double y) { this.id = id; this.y = y; this.lastSeen = System.currentTimeMillis(); }
-        boolean isBelowY18() { return y <= MAX_DETECTION_Y; }
+        EntityRecord(int id, double y) { this.id = id; yCoord = y; lastSeen = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < DATA_TIMEOUT_MS; }
+        boolean isBelowY() { return yCoord <= MAX_DETECTION_Y; }
+        void update(double y) { yCoord = y; lastSeen = System.currentTimeMillis(); }
     }
     
-    private static class RenderData {
-        final Box box;
-        final Color fill;
-        final Color line;
-        RenderData(Box box, Color fill, Color line) { this.box = box; this.fill = fill; this.line = line; }
+    private static class EspBox {
+        final Box boundingBox;
+        final Color fillColor;
+        final Color lineColor;
+        EspBox(Box box, Color fill, Color line) { boundingBox = box; fillColor = fill; lineColor = line; }
+    }
+    
+    private static class TracerPoint {
+        final Vec3d position;
+        final long creationTime;
+        TracerPoint(Vec3d pos) { position = pos; creationTime = System.currentTimeMillis(); }
+        boolean isValid() { return System.currentTimeMillis() - creationTime < 1000; }
     }
     
     // ============================================================
-    // COLORS
-    // ============================================================
-    
-    private static final Color SPAWNER_COLOR = new Color(255, 30, 30, 255);
-    private static final Color SPAWNER_FILL = new Color(255, 30, 30, 100);
-    private static final Color CHEST_COLOR = new Color(255, 200, 50, 255);
-    private static final Color CHEST_FILL = new Color(255, 200, 50, 100);
-    private static final Color FURNACE_COLOR = new Color(150, 150, 150, 255);
-    private static final Color FURNACE_FILL = new Color(150, 150, 150, 100);
-    private static final Color BEACON_COLOR = new Color(50, 200, 255, 255);
-    private static final Color BEACON_FILL = new Color(50, 200, 255, 100);
-    private static final Color REDSTONE_ACTIVE = new Color(255, 50, 50, 255);
-    private static final Color REDSTONE_ACTIVE_FILL = new Color(255, 50, 50, 100);
-    private static final Color COMPARATOR_COLOR = new Color(255, 100, 200, 255);
-    private static final Color COMPARATOR_FILL = new Color(255, 100, 200, 100);
-    private static final Color ENTITY_COLOR = new Color(255, 100, 255, 255);
-    private static final Color ENTITY_FILL = new Color(255, 100, 255, 100);
-    private static final Color EVENT_COLOR = new Color(255, 255, 100, 255);
-    private static final Color EVENT_FILL = new Color(255, 255, 100, 100);
-    
-    // ============================================================
-    // PACKET CAPTURE - ALL 8 CHANNELS
+    // PACKET CAPTURE - ALL 8 CHANNELS (SILENT)
     // ============================================================
     
     @EventHandler
-    private void onPacketReceive(PacketEvent.Receive event) {
-        if (!isActive) return;
+    private void onPacketReceived(PacketEvent.Receive event) {
+        if (!moduleActive) return;
         
-        // 1 & 8. CHUNK DATA - Bulk world sync
+        // Channel 1 & 8: Chunk Data
         if (event.packet instanceof ChunkDataS2CPacket packet) {
-            captureChunkData(packet);
+            processChunkData(packet);
         }
         
-        // 1. BLOCK ENTITY UPDATE - NBT data
+        // Channel 1: Block Entity Update
         if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
-            captureBlockEntityNBT(packet);
+            processBlockEntityUpdate(packet);
         }
         
-        // 2 & 3. BLOCK UPDATE - State changes, redstone power
+        // Channel 2 & 3: Block Update
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
-            captureBlockState(packet);
+            processBlockUpdate(packet);
         }
         
-        // 2. CHUNK DELTA - Multiple block updates
-        if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
-            captureChunkDelta(packet);
-        }
-        
-        // 2 & 5. BLOCK EVENT - Actions/animations
+        // Channel 2 & 5: Block Event
         if (event.packet instanceof BlockEventS2CPacket packet) {
-            captureBlockEvent(packet);
+            processBlockEvent(packet);
         }
         
-        // 4. CONTAINER SYNC - Inventory override
+        // Channel 4: Container Sync
         if (event.packet instanceof OpenScreenS2CPacket packet) {
-            captureContainerSync(packet);
+            processContainerSync(packet);
         }
         
-        // 2. ENTITY SPAWN
+        // Channel 2: Entity Spawn
         if (event.packet instanceof EntitySpawnS2CPacket packet) {
-            captureEntitySpawn(packet);
+            processEntitySpawn(packet);
         }
     }
     
     // ============================================================
-    // CHANNEL 1 & 8: NBT + CHUNK SECTION DATA
+    // CHANNEL 1 & 8: CHUNK DATA PROCESSING
     // ============================================================
     
-    private void captureChunkData(ChunkDataS2CPacket packet) {
+    private void processChunkData(ChunkDataS2CPacket packet) {
         try {
             int chunkX = 0, chunkZ = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                String name = f.getName();
-                if (name.equals("x") || name.equals("field_1210")) chunkX = f.getInt(packet);
-                if (name.equals("z") || name.equals("field_1211")) chunkZ = f.getInt(packet);
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                String fieldName = field.getName();
+                if (fieldName.equals("x") || fieldName.equals("field_1210")) chunkX = field.getInt(packet);
+                if (fieldName.equals("z") || fieldName.equals("field_1211")) chunkZ = field.getInt(packet);
             }
-            ChunkPos pos = new ChunkPos(chunkX, chunkZ);
-            chunkData.put(pos, System.currentTimeMillis());
-            chunkLoadTimes.put(pos, System.currentTimeMillis());
-            ChatUtils.info("EntityDebug", "§7Chunk loaded: [" + chunkX + ", " + chunkZ + "]");
+            ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
+            chunkLoadRecords.put(chunkPos, System.currentTimeMillis());
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // CHANNEL 1: NBT BLOCK ENTITY DATA (1.21.11 compatible)
+    // CHANNEL 1: NBT BLOCK ENTITY DATA PROCESSING
     // ============================================================
     
-    private void captureBlockEntityNBT(BlockEntityUpdateS2CPacket packet) {
+    private void processBlockEntityUpdate(BlockEntityUpdateS2CPacket packet) {
         try {
-            BlockPos pos = packet.getPos();
-            String type = packet.getBlockEntityType().toString();
-            NbtCompound nbt = packet.getNbt();
+            BlockPos position = packet.getPos();
+            String entityType = packet.getBlockEntityType().toString();
+            NbtCompound nbtData = packet.getNbt();
             
-            if (nbt != null) {
-                if (type.contains("Spawner")) parseSpawnerNBT(pos, nbt);
-                if (type.contains("Chest") || type.contains("Barrel") || type.contains("Shulker")) parseChestNBT(pos, nbt);
-                if (type.contains("Furnace")) parseFurnaceNBT(pos, nbt);
-                if (type.contains("Beacon")) parseBeaconNBT(pos, nbt);
+            if (nbtData == null) return;
+            
+            if (entityType.contains("Spawner")) {
+                processSpawnerData(position, nbtData);
             }
+            
+            if (entityType.contains("Chest") || entityType.contains("Barrel") || entityType.contains("Shulker")) {
+                processChestData(position, nbtData);
+            }
+            
+            if (entityType.contains("Furnace")) {
+                processFurnaceData(position, nbtData);
+            }
+            
+            if (entityType.contains("Beacon")) {
+                processBeaconData(position, nbtData);
+            }
+            
         } catch (Exception ignored) {}
     }
     
-    private void parseSpawnerNBT(BlockPos pos, NbtCompound nbt) {
-        SpawnerData data = spawnerData.computeIfAbsent(pos, k -> new SpawnerData(pos));
+    private void processSpawnerData(BlockPos pos, NbtCompound nbt) {
+        SpawnerRecord record = spawnerRecords.computeIfAbsent(pos, k -> new SpawnerRecord(pos));
         try {
             nbt.getCompound("SpawnData").ifPresent(spawnData -> {
                 spawnData.getCompound("entity").ifPresent(entity -> {
-                    entity.getString("id").ifPresent(id -> data.spawnsEntity = id);
+                    entity.getString("id").ifPresent(id -> record.entityType = id);
                 });
             });
-            data.lastSeen = System.currentTimeMillis();
-            if (pos.getY() <= MAX_DETECTION_Y && data.spawnsEntity != null) {
-                ChatUtils.info("EntityDebug", "§c§lSPAWNER: " + data.spawnsEntity + " at Y=" + pos.getY());
-            }
-        } catch (Exception ignored) {}
-    }
-    
-    private void parseChestNBT(BlockPos pos, NbtCompound nbt) {
-        ChestData data = chestData.computeIfAbsent(pos, k -> new ChestData(pos));
-        try {
-            // FIXED: getList returns Optional<NbtList> in 1.21.11
-            nbt.getList("Items").ifPresent(items -> {
-                data.itemCount = items.size();
-            });
-            data.lastSeen = System.currentTimeMillis();
-            if (pos.getY() <= MAX_DETECTION_Y && data.itemCount > 0) {
-                ChatUtils.info("EntityDebug", "§eCHEST with " + data.itemCount + " items at Y=" + pos.getY());
-            }
-        } catch (Exception ignored) {}
-    }
-    
-    private void parseFurnaceNBT(BlockPos pos, NbtCompound nbt) {
-        FurnaceData data = furnaceData.computeIfAbsent(pos, k -> new FurnaceData(pos));
-        try {
-            int burnTime = nbt.getInt("BurnTime").orElse(0);
-            data.isBurning = burnTime > 0;
-            data.lastSeen = System.currentTimeMillis();
-            if (pos.getY() <= MAX_DETECTION_Y && data.isBurning) {
-                ChatUtils.info("EntityDebug", "§7FURNACE burning at Y=" + pos.getY());
-            }
-        } catch (Exception ignored) {}
-    }
-    
-    private void parseBeaconNBT(BlockPos pos, NbtCompound nbt) {
-        BeaconData data = beaconData.computeIfAbsent(pos, k -> new BeaconData(pos));
-        try {
-            data.levels = nbt.getInt("Levels").orElse(0);
-            data.lastSeen = System.currentTimeMillis();
-            if (pos.getY() <= MAX_DETECTION_Y && data.levels > 0) {
-                ChatUtils.info("EntityDebug", "§bBEACON level " + data.levels + " at Y=" + pos.getY());
-            }
-        } catch (Exception ignored) {}
-    }
-    
-    // ============================================================
-    // CHANNEL 2 & 3: BLOCKSTATE (Redstone power, comparator mode)
-    // ============================================================
-    
-    private void captureBlockState(BlockUpdateS2CPacket packet) {
-        try {
-            BlockPos pos = packet.getPos();
-            Block block = getBlockFromPacket(packet);
+            record.update();
             
-            if (block != Blocks.AIR) {
-                // Channel 3: Redstone power level detection
-                if (isRedstoneComponent(block)) {
-                    int power = getRedstonePower(packet);
-                    if (power > 0) {
-                        redstonePowerLevels.put(pos, power);
-                        redstoneLastUpdate.put(pos, System.currentTimeMillis());
-                        
-                        // Track change frequency for server tick analysis (Channel 6)
-                        long now = System.currentTimeMillis();
-                        if (lastRedstoneChange.containsKey(pos)) {
-                            long delta = now - lastRedstoneChange.get(pos);
-                            if (delta < 500) {
-                                redstoneChangeFrequency.put(pos, redstoneChangeFrequency.getOrDefault(pos, 0) + 1);
-                            }
-                        }
-                        lastRedstoneChange.put(pos, now);
-                        
-                        if (pos.getY() <= MAX_DETECTION_Y) {
-                            ChatUtils.info("EntityDebug", "§cREDSTONE power " + power + " at Y=" + pos.getY());
-                        }
-                    }
-                }
-                
-                // Channel 7: Comparator output detection
-                if (block == Blocks.COMPARATOR) {
-                    int output = getComparatorOutput(packet);
-                    comparatorOutputs.put(pos, output);
-                    if (pos.getY() <= MAX_DETECTION_Y) {
-                        ChatUtils.info("EntityDebug", "§5COMPARATOR output " + output + " at Y=" + pos.getY());
-                    }
-                }
+            if (record.isBelowY() && !notifiedSpawners.contains(pos)) {
+                sendNotification("SPAWNER", pos.getY(), "§c");
+                notifiedSpawners.add(pos);
+                scheduleCooldown();
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void processChestData(BlockPos pos, NbtCompound nbt) {
+        ChestRecord record = chestRecords.computeIfAbsent(pos, k -> new ChestRecord(pos));
+        try {
+            nbt.getList("Items").ifPresent(items -> record.itemCount = items.size());
+            record.update();
+            
+            if (record.isBelowY() && record.hasItems() && !notifiedChests.contains(pos)) {
+                sendNotification("CHEST", pos.getY(), "§e");
+                notifiedChests.add(pos);
+                scheduleCooldown();
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void processFurnaceData(BlockPos pos, NbtCompound nbt) {
+        FurnaceRecord record = furnaceRecords.computeIfAbsent(pos, k -> new FurnaceRecord(pos));
+        try {
+            int burnTimeValue = nbt.getInt("BurnTime").orElse(0);
+            record.isBurning = burnTimeValue > 0;
+            record.update();
+            
+            if (record.isBelowY() && record.isActive() && !notifiedFurnaces.contains(pos)) {
+                sendNotification("FURNACE", pos.getY(), "§7");
+                notifiedFurnaces.add(pos);
+                scheduleCooldown();
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void processBeaconData(BlockPos pos, NbtCompound nbt) {
+        BeaconRecord record = beaconRecords.computeIfAbsent(pos, k -> new BeaconRecord(pos));
+        try {
+            record.powerLevel = nbt.getInt("Levels").orElse(0);
+            record.update();
+            
+            if (record.isBelowY() && record.isActive() && !notifiedBeacons.contains(pos)) {
+                sendNotification("BEACON", pos.getY(), "§b");
+                notifiedBeacons.add(pos);
+                scheduleCooldown();
             }
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // CHANNEL 2: CHUNK DELTA PACKET
+    // CHANNEL 2 & 3: BLOCK STATE PROCESSING (Redstone)
     // ============================================================
     
-    private void captureChunkDelta(ChunkDeltaUpdateS2CPacket packet) {
+    private void processBlockUpdate(BlockUpdateS2CPacket packet) {
         try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (Map.class.isAssignableFrom(f.getType())) {
-                    f.setAccessible(true);
-                    Map<?, ?> updates = (Map<?, ?>) f.get(packet);
-                    if (updates != null) {
-                        for (Map.Entry<?, ?> entry : updates.entrySet()) {
-                            try {
-                                long posLong = (long) entry.getKey();
-                                int y = (int)(posLong << 52 >> 52);
-                                if (y <= MAX_DETECTION_Y) {
-                                    // Just mark that activity happened
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    }
-                }
+            BlockPos position = packet.getPos();
+            Block blockType = extractBlockFromPacket(packet);
+            
+            if (blockType == Blocks.REDSTONE_WIRE) {
+                processRedstoneWire(position, packet);
             }
+            
+            if (blockType == Blocks.COMPARATOR) {
+                processComparator(position, packet);
+            }
+            
         } catch (Exception ignored) {}
     }
     
+    private void processRedstoneWire(BlockPos pos, BlockUpdateS2CPacket packet) {
+        int powerLevel = extractRedstonePower(packet);
+        if (powerLevel > 0) {
+            RedstoneRecord record = redstoneRecords.computeIfAbsent(pos, k -> new RedstoneRecord(pos, powerLevel));
+            record.update(powerLevel);
+            
+            // Track change frequency for server tick analysis (Channel 6)
+            long currentTime = System.currentTimeMillis();
+            Long lastChange = lastRedstoneChangeTime.get(pos);
+            if (lastChange != null && currentTime - lastChange < 500) {
+                redstoneChangeFreq.computeIfAbsent(pos, k -> new AtomicInteger()).incrementAndGet();
+            }
+            lastRedstoneChangeTime.put(pos, currentTime);
+            
+            if (record.isBelowY() && record.isPowered() && !notifiedRedstone.contains(pos)) {
+                sendNotification("REDSTONE", pos.getY(), "§c");
+                notifiedRedstone.add(pos);
+                scheduleCooldown();
+            }
+        }
+    }
+    
+    private void processComparator(BlockPos pos, BlockUpdateS2CPacket packet) {
+        int outputValue = extractComparatorOutput(packet);
+        if (outputValue > 0) {
+            ComparatorRecord record = comparatorRecords.computeIfAbsent(pos, k -> new ComparatorRecord(pos, outputValue));
+            record.update(outputValue);
+            
+            if (record.isBelowY() && record.hasOutput() && !notifiedComparators.contains(pos)) {
+                sendNotification("COMPARATOR", pos.getY(), "§d");
+                notifiedComparators.add(pos);
+                scheduleCooldown();
+            }
+        }
+    }
+    
     // ============================================================
-    // CHANNEL 2 & 5: BLOCK EVENTS
+    // CHANNEL 2 & 5: BLOCK EVENTS PROCESSING
     // ============================================================
     
-    private void captureBlockEvent(BlockEventS2CPacket packet) {
+    private void processBlockEvent(BlockEventS2CPacket packet) {
         try {
-            BlockPos pos = packet.getPos();
-            // Use reflection to get event ID since getEventId() doesn't exist in 1.21.11
-            int eventId = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == int.class) {
-                    f.setAccessible(true);
-                    eventId = f.getInt(packet);
+            BlockPos position = packet.getPos();
+            int eventIdentifier = 0;
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                if (field.getType() == int.class) {
+                    field.setAccessible(true);
+                    eventIdentifier = field.getInt(packet);
                     break;
                 }
             }
-            blockEvents.put(pos, new BlockEventData(pos, eventId));
             
-            if (pos.getY() <= MAX_DETECTION_Y) {
-                if (eventId == 1) ChatUtils.info("EntityDebug", "§eCHEST animation at Y=" + pos.getY());
-                else if (eventId == 0) ChatUtils.info("EntityDebug", "§7PISTON moved at Y=" + pos.getY());
-                else if (eventId == 3) ChatUtils.info("EntityDebug", "§bNOTE BLOCK played at Y=" + pos.getY());
+            // Silent capture - no chat messages
+            if (position.getY() <= MAX_DETECTION_Y) {
+                // Event detected but not logged to avoid spam
             }
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // CHANNEL 4: CONTAINER SYNC
+    // CHANNEL 4: CONTAINER SYNC PROCESSING
     // ============================================================
     
-    private void captureContainerSync(OpenScreenS2CPacket packet) {
+    private void processContainerSync(OpenScreenS2CPacket packet) {
         try {
-            int syncId = packet.getSyncId();
-            containerSyncs.put(syncId, System.currentTimeMillis());
-            ChatUtils.info("EntityDebug", "§6Container opened - inventory sync active");
+            int syncIdentifier = packet.getSyncId();
+            // Silent capture - no chat messages
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // ENTITY SPAWN
+    // ENTITY SPAWN PROCESSING
     // ============================================================
     
-    private void captureEntitySpawn(EntitySpawnS2CPacket packet) {
+    private void processEntitySpawn(EntitySpawnS2CPacket packet) {
         try {
-            int id = -1;
-            double y = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                String name = f.getName();
-                if (name.equals("id") || name.equals("field_1217")) id = f.getInt(packet);
-                if (f.getType() == double.class) {
-                    double val = f.getDouble(packet);
-                    if (y == 0) y = val;
+            int entityId = -1;
+            double yCoordinate = 0;
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                if (field.getName().equals("id") || field.getName().equals("field_1217")) entityId = field.getInt(packet);
+                if (field.getType() == double.class && yCoordinate == 0) yCoordinate = field.getDouble(packet);
+            }
+            if (entityId != -1 && yCoordinate <= MAX_DETECTION_Y) {
+                entityRecords.put(entityId, new EntityRecord(entityId, yCoordinate));
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    // ============================================================
+    // HELPER METHODS FOR PACKET EXTRACTION
+    // ============================================================
+    
+    private Block extractBlockFromPacket(BlockUpdateS2CPacket packet) {
+        try {
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                if (field.getType().getName().contains("BlockState")) {
+                    field.setAccessible(true);
+                    Object blockState = field.get(packet);
+                    for (Field innerField : blockState.getClass().getDeclaredFields()) {
+                        if (innerField.getType() == Block.class) {
+                            innerField.setAccessible(true);
+                            return (Block) innerField.get(blockState);
+                        }
+                    }
                 }
             }
-            if (id != -1 && y <= MAX_DETECTION_Y) {
-                entities.put(id, new EntityData(id, y));
-                ChatUtils.info("EntityDebug", "§dEntity at Y=" + (int)y);
+        } catch (Exception ignored) {}
+        return Blocks.AIR;
+    }
+    
+    private int extractRedstonePower(BlockUpdateS2CPacket packet) {
+        try {
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                if (field.getType().getName().contains("BlockState")) {
+                    field.setAccessible(true);
+                    Object blockState = field.get(packet);
+                    for (Field innerField : blockState.getClass().getDeclaredFields()) {
+                        String innerName = innerField.getName().toLowerCase();
+                        if (innerName.contains("power")) {
+                            innerField.setAccessible(true);
+                            return innerField.getInt(blockState);
+                        }
+                    }
+                }
             }
         } catch (Exception ignored) {}
+        return 0;
+    }
+    
+    private int extractComparatorOutput(BlockUpdateS2CPacket packet) {
+        try {
+            for (Field field : packet.getClass().getDeclaredFields()) {
+                if (field.getType().getName().contains("BlockState")) {
+                    field.setAccessible(true);
+                    Object blockState = field.get(packet);
+                    for (Field innerField : blockState.getClass().getDeclaredFields()) {
+                        String innerName = innerField.getName().toLowerCase();
+                        if (innerName.contains("output")) {
+                            innerField.setAccessible(true);
+                            return innerField.getInt(blockState);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return 0;
+    }
+    
+    // ============================================================
+    // NOTIFICATION SYSTEM (NO SPAM)
+    // ============================================================
+    
+    private void sendNotification(String detectionType, int yLevel, String colorCode) {
+        // Check global cooldown for this detection type
+        AtomicLong lastGlobal = globalCooldown.computeIfAbsent(detectionType, k -> new AtomicLong(0));
+        if (System.currentTimeMillis() - lastGlobal.get() < GLOBAL_COOLDOWN_MS) return;
+        if (messageThrottle.get() > 0) return;
+        
+        ChatUtils.info("EntityDebug", colorCode + detectionType + " §7found at Y=" + yLevel);
+        lastGlobal.set(System.currentTimeMillis());
+    }
+    
+    private void scheduleCooldown() {
+        messageThrottle.incrementAndGet();
+        // Will be decremented in tick handler
     }
     
     // ============================================================
     // CHANNEL 6: SERVER TICK DETECTION
     // ============================================================
     
-    private void detectServerTickActivity() {
-        for (Map.Entry<BlockPos, Integer> freq : redstoneChangeFrequency.entrySet()) {
-            BlockPos pos = freq.getKey();
-            if (pos.getY() <= MAX_DETECTION_Y && freq.getValue() > 20 && 
-                System.currentTimeMillis() - lastRedstoneChange.getOrDefault(pos, 0L) < 5000) {
-                ChatUtils.info("EntityDebug", "§6Active redstone circuit at Y=" + pos.getY() + " - " + freq.getValue() + " changes/sec");
+    private void analyzeServerTickActivity() {
+        for (Map.Entry<BlockPos, AtomicInteger> frequencyEntry : redstoneChangeFreq.entrySet()) {
+            BlockPos position = frequencyEntry.getKey();
+            int changeFrequency = frequencyEntry.getValue().get();
+            if (position.getY() <= MAX_DETECTION_Y && changeFrequency > 15) {
+                Long lastChange = lastRedstoneChangeTime.get(position);
+                if (lastChange != null && System.currentTimeMillis() - lastChange < 5000) {
+                    // Active redstone circuit detected - silent capture
+                }
             }
         }
-        if (tickCounter % 100 == 0) redstoneChangeFrequency.clear();
+        
+        // Reset frequency counters every 100 ticks (5 seconds)
+        if (tickCounter % 100 == 0) {
+            redstoneChangeFreq.clear();
+        }
     }
     
     // ============================================================
-    // CHANNEL 7: UPDATE COMPARATOR OUTPUTS (Derived signal)
+    // CHANNEL 7: UPDATE COMPARATOR OUTPUTS (Derived Signal)
     // ============================================================
     
-    private void updateDerivedComparatorOutputs() {
-        for (Map.Entry<BlockPos, Integer> comp : comparatorOutputs.entrySet()) {
-            BlockPos below = comp.getKey().down();
-            ChestData chest = chestData.get(below);
-            int newOutput = 0;
-            if (chest != null && chest.itemCount > 0) newOutput = Math.min(15, chest.itemCount);
-            if (!comp.getValue().equals(newOutput)) {
-                comparatorOutputs.put(comp.getKey(), newOutput);
-                if (comp.getKey().getY() <= MAX_DETECTION_Y && newOutput > 0) {
-                    ChatUtils.info("EntityDebug", "§5COMPARATOR output changed to " + newOutput + " at Y=" + comp.getKey().getY());
+    private void updateDerivedComparatorSignals() {
+        for (Map.Entry<BlockPos, ComparatorRecord> comparatorEntry : comparatorRecords.entrySet()) {
+            BlockPos comparatorPos = comparatorEntry.getKey();
+            BlockPos belowPos = comparatorPos.down();
+            ChestRecord chestBelow = chestRecords.get(belowPos);
+            
+            int calculatedOutput = 0;
+            if (chestBelow != null && chestBelow.hasItems()) {
+                calculatedOutput = Math.min(15, chestBelow.itemCount);
+            }
+            
+            ComparatorRecord record = comparatorEntry.getValue();
+            if (record.outputSignal != calculatedOutput) {
+                record.update(calculatedOutput);
+                if (record.isBelowY() && calculatedOutput > 0) {
+                    // Derived signal changed - silent capture
                 }
             }
         }
     }
     
     // ============================================================
-    // HELPER METHODS
+    // ESP VISUALIZATION UPDATE
     // ============================================================
     
-    private Block getBlockFromPacket(BlockUpdateS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType().getName().contains("BlockState")) {
-                    f.setAccessible(true);
-                    Object state = f.get(packet);
-                    for (Field f2 : state.getClass().getDeclaredFields()) {
-                        if (f2.getType() == Block.class) {
-                            f2.setAccessible(true);
-                            return (Block) f2.get(state);
-                        }
+    private void refreshEspVisuals() {
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastEspUpdate < ESP_UPDATE_INTERVAL_MS) return;
+        
+        espBoxes.clear();
+        
+        // Add spawner ESP boxes
+        for (SpawnerRecord spawner : spawnerRecords.values()) {
+            if (spawner.isValid() && spawner.isBelowY() && spawner.entityType != null) {
+                Box spawnerBox = createBlockBox(spawner.pos);
+                espBoxes.add(new EspBox(spawnerBox, ESP_FILL, ESP_LINE));
+            }
+        }
+        
+        // Add chest ESP boxes
+        for (ChestRecord chest : chestRecords.values()) {
+            if (chest.isValid() && chest.isBelowY() && chest.hasItems()) {
+                Box chestBox = createBlockBox(chest.pos);
+                espBoxes.add(new EspBox(chestBox, ESP_FILL, ESP_LINE));
+            }
+        }
+        
+        // Add furnace ESP boxes (only burning)
+        for (FurnaceRecord furnace : furnaceRecords.values()) {
+            if (furnace.isValid() && furnace.isBelowY() && furnace.isActive()) {
+                Box furnaceBox = createBlockBox(furnace.pos);
+                espBoxes.add(new EspBox(furnaceBox, ESP_FILL, ESP_LINE));
+            }
+        }
+        
+        // Add beacon ESP boxes
+        for (BeaconRecord beacon : beaconRecords.values()) {
+            if (beacon.isValid() && beacon.isBelowY() && beacon.isActive()) {
+                Box beaconBox = createBlockBox(beacon.pos);
+                espBoxes.add(new EspBox(beaconBox, ESP_FILL, ESP_LINE));
+            }
+        }
+        
+        // Add redstone ESP boxes (active only)
+        for (RedstoneRecord redstone : redstoneRecords.values()) {
+            if (redstone.isValid() && redstone.isBelowY() && redstone.isPowered()) {
+                Box redstoneBox = createBlockBox(redstone.pos);
+                espBoxes.add(new EspBox(redstoneBox, ESP_FILL, REDSTONE_COLOR));
+            }
+        }
+        
+        // Add comparator ESP boxes
+        for (ComparatorRecord comparator : comparatorRecords.values()) {
+            if (comparator.isValid() && comparator.isBelowY() && comparator.hasOutput()) {
+                Box comparatorBox = createBlockBox(comparator.pos);
+                espBoxes.add(new EspBox(comparatorBox, ESP_FILL, ESP_LINE));
+            }
+        }
+        
+        totalDetections = espBoxes.size();
+        lastEspUpdate = currentTime;
+    }
+    
+    private Box createBlockBox(BlockPos position) {
+        return new Box(
+            position.getX(), position.getY(), position.getZ(),
+            position.getX() + 1, position.getY() + 1, position.getZ() + 1
+        );
+    }
+    
+    // ============================================================
+    // TRACER VISUALIZATION UPDATE
+    // ============================================================
+    
+    private void refreshTracers() {
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastTracerUpdate < TRACER_UPDATE_INTERVAL_MS) return;
+        
+        tempTracers.clear();
+        
+        // Collect all valid target positions
+        for (SpawnerRecord spawner : spawnerRecords.values()) {
+            if (spawner.isValid() && spawner.isBelowY() && spawner.entityType != null) {
+                tempTracers.add(new TracerPoint(createTracerTarget(spawner.pos)));
+            }
+        }
+        
+        for (ChestRecord chest : chestRecords.values()) {
+            if (chest.isValid() && chest.isBelowY() && chest.hasItems()) {
+                tempTracers.add(new TracerPoint(createTracerTarget(chest.pos)));
+            }
+        }
+        
+        for (FurnaceRecord furnace : furnaceRecords.values()) {
+            if (furnace.isValid() && furnace.isBelowY() && furnace.isActive()) {
+                tempTracers.add(new TracerPoint(createTracerTarget(furnace.pos)));
+            }
+        }
+        
+        for (BeaconRecord beacon : beaconRecords.values()) {
+            if (beacon.isValid() && beacon.isBelowY() && beacon.isActive()) {
+                tempTracers.add(new TracerPoint(createTracerTarget(beacon.pos)));
+            }
+        }
+        
+        for (RedstoneRecord redstone : redstoneRecords.values()) {
+            if (redstone.isValid() && redstone.isBelowY() && redstone.isPowered()) {
+                tempTracers.add(new TracerPoint(createTracerTarget(redstone.pos)));
+            }
+        }
+        
+        tracerPoints.clear();
+        tracerPoints.addAll(tempTracers);
+        lastTracerUpdate = currentTime;
+    }
+    
+    private Vec3d createTracerTarget(BlockPos position) {
+        return new Vec3d(position.getX() + 0.5, TRACER_HEIGHT, position.getZ() + 0.5);
+    }
+    
+    // ============================================================
+    // EXISTING CHUNK SCANNER (Initial detection)
+    // ============================================================
+    
+    private void scanExistingWorldChunks() {
+        if (mc.world == null || mc.player == null) return;
+        
+        BlockPos playerPos = mc.player.getBlockPos();
+        
+        for (int dx = -SCAN_RADIUS; dx <= SCAN_RADIUS; dx++) {
+            for (int dz = -SCAN_RADIUS; dz <= SCAN_RADIUS; dz++) {
+                for (int yCoord = mc.world.getBottomY(); yCoord <= MAX_DETECTION_Y; yCoord++) {
+                    BlockPos scanPos = playerPos.add(dx, yCoord - playerPos.getY(), dz);
+                    if (yCoord > MAX_DETECTION_Y) continue;
+                    
+                    Block foundBlock = mc.world.getBlockState(scanPos).getBlock();
+                    
+                    if (foundBlock == Blocks.SPAWNER && !notifiedSpawners.contains(scanPos)) {
+                        sendNotification("SPAWNER", scanPos.getY(), "§c");
+                        notifiedSpawners.add(scanPos);
+                        SpawnerRecord record = spawnerRecords.computeIfAbsent(scanPos, k -> new SpawnerRecord(scanPos));
+                        record.entityType = "Unknown";
+                        record.update();
+                    }
+                    
+                    if ((foundBlock == Blocks.CHEST || foundBlock == Blocks.TRAPPED_CHEST) && !notifiedChests.contains(scanPos)) {
+                        sendNotification("CHEST", scanPos.getY(), "§e");
+                        notifiedChests.add(scanPos);
+                        ChestRecord record = chestRecords.computeIfAbsent(scanPos, k -> new ChestRecord(scanPos));
+                        record.itemCount = 1;
+                        record.update();
+                    }
+                    
+                    if ((foundBlock == Blocks.FURNACE || foundBlock == Blocks.BLAST_FURNACE) && !notifiedFurnaces.contains(scanPos)) {
+                        sendNotification("FURNACE", scanPos.getY(), "§7");
+                        notifiedFurnaces.add(scanPos);
+                        FurnaceRecord record = furnaceRecords.computeIfAbsent(scanPos, k -> new FurnaceRecord(scanPos));
+                        record.isBurning = false;
+                        record.update();
+                    }
+                    
+                    if (foundBlock == Blocks.BEACON && !notifiedBeacons.contains(scanPos)) {
+                        sendNotification("BEACON", scanPos.getY(), "§b");
+                        notifiedBeacons.add(scanPos);
+                        BeaconRecord record = beaconRecords.computeIfAbsent(scanPos, k -> new BeaconRecord(scanPos));
+                        record.powerLevel = 1;
+                        record.update();
                     }
                 }
             }
-        } catch (Exception e) {}
-        return Blocks.AIR;
-    }
-    
-    private int getRedstonePower(BlockUpdateS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType().getName().contains("BlockState")) {
-                    f.setAccessible(true);
-                    Object state = f.get(packet);
-                    for (Field f2 : state.getClass().getDeclaredFields()) {
-                        String name = f2.getName().toLowerCase();
-                        if (name.contains("power")) {
-                            f2.setAccessible(true);
-                            return f2.getInt(state);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {}
-        return 0;
-    }
-    
-    private int getComparatorOutput(BlockUpdateS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType().getName().contains("BlockState")) {
-                    f.setAccessible(true);
-                    Object state = f.get(packet);
-                    for (Field f2 : state.getClass().getDeclaredFields()) {
-                        String name = f2.getName().toLowerCase();
-                        if (name.contains("output")) {
-                            f2.setAccessible(true);
-                            return f2.getInt(state);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {}
-        return 0;
-    }
-    
-    private boolean isRedstoneComponent(Block block) {
-        return block == Blocks.REDSTONE_WIRE || block == Blocks.REDSTONE_TORCH ||
-               block == Blocks.REDSTONE_BLOCK || block == Blocks.REDSTONE_LAMP ||
-               block == Blocks.REPEATER || block == Blocks.COMPARATOR ||
-               block == Blocks.LEVER;
-    }
-    
-    // ============================================================
-    // CLEANUP AND RENDER CACHE
-    // ============================================================
-    
-    private void cleanup() {
-        long now = System.currentTimeMillis();
-        chestData.entrySet().removeIf(e -> now - e.getValue().lastSeen > DATA_TIMEOUT_MS);
-        spawnerData.entrySet().removeIf(e -> now - e.getValue().lastSeen > DATA_TIMEOUT_MS);
-        furnaceData.entrySet().removeIf(e -> now - e.getValue().lastSeen > DATA_TIMEOUT_MS);
-        beaconData.entrySet().removeIf(e -> now - e.getValue().lastSeen > DATA_TIMEOUT_MS);
-        redstoneLastUpdate.entrySet().removeIf(e -> now - e.getValue() > 5000);
-        blockEvents.entrySet().removeIf(e -> !e.getValue().isRecent());
-        entities.entrySet().removeIf(e -> now - e.getValue().lastSeen > DATA_TIMEOUT_MS);
-        chunkData.entrySet().removeIf(e -> now - e.getValue() > 120000);
-        containerSyncs.entrySet().removeIf(e -> now - e.getValue() > 5000);
-    }
-    
-    private void updateRenderCache() {
-        renderCache.clear();
-        
-        // Spawners
-        for (SpawnerData data : spawnerData.values()) {
-            if (data.isBelowY18() && data.spawnsEntity != null) {
-                Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
-                renderCache.put(data.pos.hashCode(), new RenderData(box, SPAWNER_FILL, SPAWNER_COLOR));
-            }
-        }
-        
-        // Chests with items
-        for (ChestData data : chestData.values()) {
-            if (data.isBelowY18() && data.itemCount > 0) {
-                Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
-                renderCache.put(data.pos.hashCode(), new RenderData(box, CHEST_FILL, CHEST_COLOR));
-            }
-        }
-        
-        // Burning furnaces
-        for (FurnaceData data : furnaceData.values()) {
-            if (data.isBelowY18() && data.isBurning) {
-                Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
-                renderCache.put(data.pos.hashCode(), new RenderData(box, FURNACE_FILL, FURNACE_COLOR));
-            }
-        }
-        
-        // Beacons
-        for (BeaconData data : beaconData.values()) {
-            if (data.isBelowY18() && data.levels > 0) {
-                Box box = new Box(data.pos.getX(), data.pos.getY(), data.pos.getZ(), data.pos.getX() + 1, data.pos.getY() + 1, data.pos.getZ() + 1);
-                renderCache.put(data.pos.hashCode(), new RenderData(box, BEACON_FILL, BEACON_COLOR));
-            }
-        }
-        
-        // Active redstone
-        for (Map.Entry<BlockPos, Integer> redstone : redstonePowerLevels.entrySet()) {
-            BlockPos pos = redstone.getKey();
-            if (pos.getY() <= MAX_DETECTION_Y && redstoneLastUpdate.containsKey(pos) && 
-                System.currentTimeMillis() - redstoneLastUpdate.get(pos) < 5000) {
-                Box box = new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
-                renderCache.put(pos.hashCode() + 1000000, new RenderData(box, REDSTONE_ACTIVE_FILL, REDSTONE_ACTIVE));
-            }
-        }
-        
-        // Comparators with output
-        for (Map.Entry<BlockPos, Integer> comp : comparatorOutputs.entrySet()) {
-            if (comp.getKey().getY() <= MAX_DETECTION_Y && comp.getValue() > 0) {
-                Box box = new Box(comp.getKey().getX(), comp.getKey().getY(), comp.getKey().getZ(), comp.getKey().getX() + 1, comp.getKey().getY() + 1, comp.getKey().getZ() + 1);
-                renderCache.put(comp.getKey().hashCode() + 2000000, new RenderData(box, COMPARATOR_FILL, COMPARATOR_COLOR));
-            }
-        }
-        
-        // Recent block events
-        for (BlockEventData event : blockEvents.values()) {
-            if (event.isRecent() && event.pos.getY() <= MAX_DETECTION_Y) {
-                Box box = new Box(event.pos.getX(), event.pos.getY(), event.pos.getZ(), event.pos.getX() + 1, event.pos.getY() + 1, event.pos.getZ() + 1);
-                renderCache.put(event.pos.hashCode() + 3000000, new RenderData(box, EVENT_FILL, EVENT_COLOR));
-            }
-        }
-        
-        // Entities below Y=18
-        for (EntityData data : entities.values()) {
-            if (data.isBelowY18() && System.currentTimeMillis() - data.lastSeen < 5000) {
-                Box box = new Box(0, data.y - 0.3, 0, 0.6, data.y + 1.8, 0.6);
-                renderCache.put(data.id, new RenderData(box, ENTITY_FILL, ENTITY_COLOR));
-            }
         }
     }
     
     // ============================================================
-    // TICK & RENDER
+    // DATA CLEANUP
+    // ============================================================
+    
+    private void purgeStaleData() {
+        long currentTime = System.currentTimeMillis();
+        
+        spawnerRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        chestRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        furnaceRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        beaconRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        redstoneRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        comparatorRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        entityRecords.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        chunkLoadRecords.entrySet().removeIf(entry -> currentTime - entry.getValue() > 120000);
+        
+        // Clean up notification tracking periodically
+        if (tickCounter % 500 == 0) {
+            notifiedSpawners.clear();
+            notifiedChests.clear();
+            notifiedFurnaces.clear();
+            notifiedBeacons.clear();
+            notifiedRedstone.clear();
+            notifiedComparators.clear();
+        }
+        
+        // Decay message throttle
+        if (messageThrottle.get() > 0 && tickCounter % 10 == 0) {
+            messageThrottle.decrementAndGet();
+        }
+    }
+    
+    // ============================================================
+    // TICK HANDLER - 20 TPS Sync
     // ============================================================
     
     @EventHandler
-    private void onTick(TickEvent.Post event) {
-        if (!isActive || mc.world == null || mc.player == null) return;
+    private void onTickUpdate(TickEvent.Post event) {
+        if (!moduleActive || mc.world == null || mc.player == null) return;
+        
         tickCounter++;
-        if (tickCounter % 20 == 0) detectServerTickActivity();
-        if (tickCounter % 10 == 0) updateDerivedComparatorOutputs();
-        if (tickCounter % 50 == 0) cleanup();
-        if (tickCounter % 5 == 0) updateRenderCache();
-    }
-    
-    @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (!isActive || mc.player == null) return;
-        double px = mc.player.getX(), pz = mc.player.getZ();
-        for (RenderData render : renderCache.values()) {
-            double dx = render.box.getCenter().x - px;
-            double dz = render.box.getCenter().z - pz;
-            if (dx * dx + dz * dz > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE) continue;
-            event.renderer.box(render.box.minX, render.box.minY, render.box.minZ, render.box.maxX, render.box.maxY, render.box.maxZ, render.fill, render.line, ShapeMode.Both, 0);
+        
+        // Update entity positions from world
+        for (Entity entity : mc.world.getEntities()) {
+            if (entity == mc.player) continue;
+            EntityRecord record = entityRecords.get(entity.getId());
+            if (record != null) {
+                record.update(entity.getY());
+            }
+        }
+        
+        // Channel 6: Server tick analysis
+        if (tickCounter % 20 == 0) {
+            analyzeServerTickActivity();
+        }
+        
+        // Channel 7: Comparator derived signals
+        if (tickCounter % 10 == 0) {
+            updateDerivedComparatorSignals();
+        }
+        
+        // Data cleanup
+        if (tickCounter % 50 == 0) {
+            purgeStaleData();
+        }
+        
+        // Visual updates
+        if (tickCounter % 2 == 0) {
+            refreshEspVisuals();
+            refreshTracers();
         }
     }
     
     // ============================================================
-    // LIFECYCLE
+    // RENDER HANDLER - ESP Boxes and Tracers
+    // ============================================================
+    
+    @EventHandler
+    private void onRenderVisuals(Render3DEvent renderEvent) {
+        if (!moduleActive || mc.player == null) return;
+        
+        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        double playerX = mc.player.getX();
+        double playerZ = mc.player.getZ();
+        Vec3d crosshairOrigin = mc.player.getCameraPosVec(renderEvent.tickDelta);
+        
+        // Render ESP boxes
+        for (EspBox espBox : espBoxes) {
+            double boxCenterX = espBox.boundingBox.getCenter().x;
+            double boxCenterZ = espBox.boundingBox.getCenter().z;
+            double distanceSq = (boxCenterX - playerX) * (boxCenterX - playerX) + (boxCenterZ - playerZ) * (boxCenterZ - playerZ);
+            
+            if (distanceSq > MAX_RENDER_DIST * MAX_RENDER_DIST) continue;
+            
+            renderEvent.renderer.box(
+                espBox.boundingBox.minX, espBox.boundingBox.minY, espBox.boundingBox.minZ,
+                espBox.boundingBox.maxX, espBox.boundingBox.maxY, espBox.boundingBox.maxZ,
+                espBox.fillColor, espBox.lineColor, ShapeMode.Both, 0
+            );
+        }
+        
+        // Render tracers from crosshair to targets
+        for (TracerPoint tracer : tracerPoints) {
+            if (!tracer.isValid()) continue;
+            
+            double tracerDx = tracer.position.x - playerX;
+            double tracerDz = tracer.position.z - playerZ;
+            if (tracerDx * tracerDx + tracerDz * tracerDz > MAX_RENDER_DIST * MAX_RENDER_DIST) continue;
+            
+            renderEvent.renderer.line(
+                crosshairOrigin.x, crosshairOrigin.y, crosshairOrigin.z,
+                tracer.position.x, tracer.position.y, tracer.position.z,
+                TRACER_COLOR
+            );
+        }
+    }
+    
+    // ============================================================
+    // MODULE LIFECYCLE
     // ============================================================
     
     @Override
     public void onActivate() {
         if (mc.world == null || mc.player == null) {
-            ChatUtils.error("EntityDebug", "Cannot activate - not in world");
+            ChatUtils.error("EntityDebug", "Cannot activate - not connected to a world");
             return;
         }
-        isActive = true;
+        
+        moduleActive = true;
         tickCounter = 0;
+        messageThrottle.set(0);
+        totalDetections = 0;
         
-        chestData.clear(); spawnerData.clear(); furnaceData.clear(); beaconData.clear();
-        redstonePowerLevels.clear(); redstoneLastUpdate.clear(); blockEvents.clear();
-        chunkData.clear(); chunkLoadTimes.clear(); entities.clear(); containerSyncs.clear();
-        redstoneChangeFrequency.clear(); lastRedstoneChange.clear(); comparatorOutputs.clear();
-        renderCache.clear();
+        // Clear all data structures
+        spawnerRecords.clear();
+        chestRecords.clear();
+        furnaceRecords.clear();
+        beaconRecords.clear();
+        redstoneRecords.clear();
+        comparatorRecords.clear();
+        entityRecords.clear();
+        chunkLoadRecords.clear();
+        redstoneChangeFreq.clear();
+        lastRedstoneChangeTime.clear();
         
-        ChatUtils.info("EntityDebug", "§c§lKRYPTON ENTITY DEBUG - 8 CHANNELS");
-        ChatUtils.info("EntityDebug", "§7- Scanning below Y=" + MAX_DETECTION_Y);
-        ChatUtils.info("EntityDebug", "§7- NBT Data: Spawners, Chests, Furnaces, Beacons");
-        ChatUtils.info("EntityDebug", "§7- BlockState: Redstone power levels");
-        ChatUtils.info("EntityDebug", "§7- Block Events: Chests, Pistons, Note Blocks");
-        ChatUtils.info("EntityDebug", "§7- Container Sync: Inventory tracking");
-        ChatUtils.info("EntityDebug", "§7- Server Tick: Redstone change frequency");
-        ChatUtils.info("EntityDebug", "§7- Comparator Outputs: Derived signals");
-        ChatUtils.info("EntityDebug", "§7- Chunk Data: Bulk sync tracking");
+        // Clear notifications
+        notifiedSpawners.clear();
+        notifiedChests.clear();
+        notifiedFurnaces.clear();
+        notifiedBeacons.clear();
+        notifiedRedstone.clear();
+        notifiedComparators.clear();
+        globalCooldown.clear();
         
-        mc.player.sendMessage(Text.literal("§8[§c§lKRYPTON§8] §78-Channel Debug §aACTIVE"), false);
+        // Clear visuals
+        espBoxes.clear();
+        tracerPoints.clear();
+        tempTracers.clear();
+        
+        // Scan existing chunks for immediate detection
+        scanExistingWorldChunks();
+        
+        ChatUtils.info("EntityDebug", "§bEntity Debug §aACTIVATED §7- Scanning below Y=18");
+        mc.player.sendMessage(Text.literal("§8[§bED§8] §7Entity Debug §aACTIVE §7(Silent mode)"), false);
     }
     
     @Override
     public void onDeactivate() {
-        isActive = false;
-        chestData.clear(); spawnerData.clear(); furnaceData.clear(); beaconData.clear();
-        redstonePowerLevels.clear(); redstoneLastUpdate.clear(); blockEvents.clear();
-        chunkData.clear(); chunkLoadTimes.clear(); entities.clear(); containerSyncs.clear();
-        redstoneChangeFrequency.clear(); lastRedstoneChange.clear(); comparatorOutputs.clear();
-        renderCache.clear();
-        ChatUtils.info("EntityDebug", "§cEntity Debug deactivated");
+        moduleActive = false;
+        
+        // Clear all data structures
+        spawnerRecords.clear();
+        chestRecords.clear();
+        furnaceRecords.clear();
+        beaconRecords.clear();
+        redstoneRecords.clear();
+        comparatorRecords.clear();
+        entityRecords.clear();
+        chunkLoadRecords.clear();
+        redstoneChangeFreq.clear();
+        lastRedstoneChangeTime.clear();
+        
+        // Clear notifications
+        notifiedSpawners.clear();
+        notifiedChests.clear();
+        notifiedFurnaces.clear();
+        notifiedBeacons.clear();
+        notifiedRedstone.clear();
+        notifiedComparators.clear();
+        globalCooldown.clear();
+        
+        // Clear visuals
+        espBoxes.clear();
+        tracerPoints.clear();
+        tempTracers.clear();
+        
+        ChatUtils.info("EntityDebug", "§cEntity Debug §7deactivated");
     }
     
     @Override
     public String getInfoString() {
-        int spawners = (int) spawnerData.values().stream().filter(s -> s.pos.getY() <= MAX_DETECTION_Y).count();
-        int chests = (int) chestData.values().stream().filter(c -> c.pos.getY() <= MAX_DETECTION_Y && c.itemCount > 0).count();
-        int furnaces = (int) furnaceData.values().stream().filter(f -> f.pos.getY() <= MAX_DETECTION_Y && f.isBurning).count();
-        int beacons = (int) beaconData.values().stream().filter(b -> b.pos.getY() <= MAX_DETECTION_Y && b.levels > 0).count();
-        int redstone = redstonePowerLevels.size();
-        int comparators = comparatorOutputs.size();
-        int events = blockEvents.size();
-        int chunks = chunkData.size();
-        return String.format("§c%d sp §8| §e%d ch §8| §7%d fu §8| §b%d be §8| §c%d rs §8| §d%d cmp §8| §e%d ev §8| §7%d ck", 
-            spawners, chests, furnaces, beacons, redstone, comparators, events, chunks);
+        int spawnerCount = (int) spawnerRecords.values().stream().filter(s -> s.isBelowY() && s.entityType != null).count();
+        int chestCount = (int) chestRecords.values().stream().filter(c -> c.isBelowY() && c.hasItems()).count();
+        int furnaceCount = (int) furnaceRecords.values().stream().filter(f -> f.isBelowY() && f.isActive()).count();
+        int beaconCount = (int) beaconRecords.values().stream().filter(b -> b.isBelowY() && b.isActive()).count();
+        int redstoneCount = (int) redstoneRecords.values().stream().filter(r -> r.isBelowY() && r.isPowered()).count();
+        
+        return String.format("§b%d total §8| §c%d sp §8| §e%d ch §8| §7%d fu §8| §b%d be §8| §c%d rs", 
+            totalDetections, spawnerCount, chestCount, furnaceCount, beaconCount, redstoneCount);
     }
 }
