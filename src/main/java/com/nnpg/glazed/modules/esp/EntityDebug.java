@@ -9,23 +9,16 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.Block;
-import net.minecraft.block.Blocks;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.EntityType;
-import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.decoration.ArmorStandEntity;
-import net.minecraft.entity.decoration.ItemFrameEntity;
-import net.minecraft.entity.mob.MobEntity;
-import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.entity.vehicle.ChestMinecartEntity;
+import net.minecraft.block.*;
+import net.minecraft.block.entity.*;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket;
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.network.packet.c2s.play.KeepAliveC2SPacket;
-import net.minecraft.network.packet.s2c.play.EntitiesDestroyS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
+import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -37,104 +30,166 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * DonutSMP EntityDebug - ACTIVE BYPASS
- * Forces server to send hidden entity data using undetectable methods
+ * DonutSMP EntityDebug - SERVER DATA EXTRACTOR
+ * Forces server to send hidden block data below Y=20 including redstone activity
  */
 public class EntityDebug extends Module {
     
     public EntityDebug() {
-        super(GlazedAddon.esp, "entity-debug", "§c§lDONUT BYPASS §7- Force entity leakage");
+        super(GlazedAddon.esp, "entity-debug", "§c§lDONUT BYPASS §7- Extract hidden server data below Y=20");
     }
     
     // Constants
     private static final int RENDER_DISTANCE = 64;
-    private static final int MAX_RENDER_Y = 25;
+    private static final int MAX_RENDER_Y = 20;
+    private static final int SCAN_RADIUS = 48;
     
-    // Data structures
-    private final Map<Integer, LeakedEntity> leakedEntities = new ConcurrentHashMap<>();
-    private final Map<BlockPos, LeakedBlock> leakedBlocks = new ConcurrentHashMap<>();
+    // Data structures for leaked server data
+    private final Map<BlockPos, LeakedBlockData> leakedBlocks = new ConcurrentHashMap<>();
+    private final Map<BlockPos, LeakedBlockEntityData> leakedBlockEntities = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, ChunkLeakData> leakedChunkData = new ConcurrentHashMap<>();
+    private final Map<BlockPos, RedstoneActivity> redstoneActivity = new ConcurrentHashMap<>();
     private final Map<Integer, Box> renderCache = new ConcurrentHashMap<>();
     
     // State
     private boolean isActive = false;
-    private long lastRenderUpdate = 0;
     private int bypassTick = 0;
     private int lastSequenceId = 0;
+    private long lastPacketAnalysis = 0;
     
-    // Light blue color for ALL ESP
+    // Colors
     private static final Color ESP_COLOR = new Color(100, 150, 255, 200);
     private static final Color ESP_FILL = new Color(100, 150, 255, 80);
+    private static final Color REDSTONE_COLOR = new Color(255, 100, 100, 200);
+    private static final Color REDSTONE_FILL = new Color(255, 100, 100, 80);
     
     // ============================================================
-    // DATA STRUCTURES
+    // DATA STRUCTURES FOR SERVER LEAKS
     // ============================================================
     
-    private static class LeakedEntity {
-        final int id;
-        final EntityType<?> type;
-        double x, y, z;
+    private static class LeakedBlockData {
+        final BlockPos pos;
+        Block block;
+        BlockState state;
+        int lightLevel;
         long lastSeen;
         String leakMethod;
+        boolean isRedstonePowered;
+        int redstonePower;
         
-        LeakedEntity(int id, EntityType<?> type, double x, double y, double z, String method) {
-            this.id = id;
-            this.type = type;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.lastSeen = System.currentTimeMillis();
-            this.leakMethod = method;
-        }
-        
-        boolean isRecent() { return System.currentTimeMillis() - lastSeen < 30000; }
-        boolean isBelowY25() { return y <= MAX_RENDER_Y; }
-        
-        Box getBoundingBox() {
-            float w = type.getWidth();
-            float h = type.getHeight();
-            return new Box(x - w/2, y, z - w/2, x + w/2, y + h, z + w/2);
-        }
-    }
-    
-    private static class LeakedBlock {
-        final BlockPos pos;
-        final Block block;
-        long lastSeen;
-        
-        LeakedBlock(BlockPos pos, Block block) {
+        LeakedBlockData(BlockPos pos, Block block, String method) {
             this.pos = pos;
             this.block = block;
             this.lastSeen = System.currentTimeMillis();
+            this.leakMethod = method;
+            this.isRedstonePowered = false;
+            this.redstonePower = 0;
         }
         
-        boolean isBelowY25() { return pos.getY() <= MAX_RENDER_Y; }
+        boolean isBelowY20() { return pos.getY() <= MAX_RENDER_Y; }
+        boolean isRecent() { return System.currentTimeMillis() - lastSeen < 30000; }
         
         Box getBoundingBox() {
             return new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
         }
+        
+        Color getColor() {
+            if (isRedstonePowered && redstonePower > 0) {
+                return new Color(255, 100, 100, 200);
+            }
+            if (block == Blocks.SPAWNER) return new Color(200, 0, 0, 200);
+            if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) return new Color(255, 200, 0, 180);
+            if (block == Blocks.BEACON) return new Color(0, 200, 255, 200);
+            if (block == Blocks.REDSTONE_WIRE) return new Color(255, 50, 50, 180);
+            if (block == Blocks.REPEATER || block == Blocks.COMPARATOR) return new Color(255, 100, 50, 180);
+            if (block == Blocks.PISTON || block == Blocks.STICKY_PISTON) return new Color(150, 150, 255, 180);
+            if (block == Blocks.OBSERVER) return new Color(100, 100, 200, 180);
+            return new Color(100, 150, 255, 160);
+        }
+    }
+    
+    private static class LeakedBlockEntityData {
+        final BlockPos pos;
+        String entityType;
+        Map<String, Object> data;
+        long lastSeen;
+        
+        LeakedBlockEntityData(BlockPos pos, String type) {
+            this.pos = pos;
+            this.entityType = type;
+            this.data = new HashMap<>();
+            this.lastSeen = System.currentTimeMillis();
+        }
+        
+        boolean isBelowY20() { return pos.getY() <= MAX_RENDER_Y; }
+        
+        Box getBoundingBox() {
+            return new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
+        }
+        
+        Color getColor() {
+            if (entityType.contains("Spawner")) return new Color(200, 0, 0, 200);
+            if (entityType.contains("Chest")) return new Color(255, 200, 0, 180);
+            if (entityType.contains("Furnace")) return new Color(150, 150, 150, 180);
+            if (entityType.contains("Hopper")) return new Color(100, 100, 100, 180);
+            if (entityType.contains("Sign")) return new Color(200, 200, 100, 160);
+            return new Color(100, 150, 255, 160);
+        }
+    }
+    
+    private static class ChunkLeakData {
+        final ChunkPos pos;
+        int suspiciousBlockCount;
+        long lastSeen;
+        
+        ChunkLeakData(ChunkPos pos) {
+            this.pos = pos;
+            this.suspiciousBlockCount = 0;
+            this.lastSeen = System.currentTimeMillis();
+        }
+    }
+    
+    private static class RedstoneActivity {
+        final BlockPos pos;
+        int lastPowerLevel;
+        long lastUpdate;
+        int updateCount;
+        
+        RedstoneActivity(BlockPos pos, int power) {
+            this.pos = pos;
+            this.lastPowerLevel = power;
+            this.lastUpdate = System.currentTimeMillis();
+            this.updateCount = 1;
+        }
+        
+        boolean isActive() { 
+            return System.currentTimeMillis() - lastUpdate < 5000 && lastPowerLevel > 0;
+        }
     }
     
     // ============================================================
-    // BYPASS TECHNIQUE 1: SEQUENCE MANIPULATION
-    // Forces entity resync without alerting anti-cheat
+    // BYPASS TECHNIQUE 1: FORCE CHUNK DATA RESEND
     // ============================================================
     
-    private void sequenceManipulationBypass() {
+    private void forceChunkDataResend() {
         if (mc.player == null || mc.getNetworkHandler() == null) return;
         
         bypassTick++;
         
-        // Every 40 ticks (2 seconds) - subtle enough to not trigger anti-cheat
-        if (bypassTick % 40 == 0) {
+        // Every 30 ticks (1.5 seconds) - force chunk data refresh
+        if (bypassTick % 30 == 0) {
             try {
-                // Send a teleport confirm with mismatched sequence
-                // This forces the server to resend entity data without rubber-banding
+                // Send teleport confirm with sequence to trigger chunk resync
                 TeleportConfirmC2SPacket confirmPacket = new TeleportConfirmC2SPacket(++lastSequenceId);
                 mc.getNetworkHandler().sendPacket(confirmPacket);
                 
-                // Small movement that doesn't actually move (confirms position)
+                // Small position jitter to force chunk update
                 PlayerMoveC2SPacket.PositionAndOnGround movePacket = new PlayerMoveC2SPacket.PositionAndOnGround(
-                    mc.player.getX(), mc.player.getY(), mc.player.getZ(), mc.player.isOnGround(), false);
+                    mc.player.getX() + 0.00001,
+                    mc.player.getY(),
+                    mc.player.getZ() + 0.00001,
+                    mc.player.isOnGround(),
+                    false);
                 mc.getNetworkHandler().sendPacket(movePacket);
                 
             } catch (Exception ignored) {}
@@ -142,17 +197,214 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // BYPASS TECHNIQUE 2: CLIENT STATUS TRIGGER
-    // Forces server to update entity tracking
+    // BYPASS TECHNIQUE 2: EXTRACT FROM CHUNK UPDATE PACKETS
+    // ============================================================
+    
+    @EventHandler
+    private void onPacketReceive(PacketEvent.Receive event) {
+        if (!isActive) return;
+        
+        // Extract block data from chunk updates (server is forced to send these)
+        if (event.packet instanceof BlockUpdateS2CPacket packet) {
+            analyzeBlockUpdatePacket(packet);
+        }
+        
+        // Extract from chunk delta updates (batch block changes)
+        if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
+            analyzeChunkDeltaPacket(packet);
+        }
+        
+        // Extract block entity data (chests, spawners, etc.)
+        if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
+            analyzeBlockEntityPacket(packet);
+        }
+        
+        // Extract from full chunk data
+        if (event.packet instanceof ChunkDataS2CPacket packet) {
+            analyzeChunkDataPacket(packet);
+        }
+    }
+    
+    private void analyzeBlockUpdatePacket(BlockUpdateS2CPacket packet) {
+        try {
+            BlockPos pos = packet.getPos();
+            BlockState state = packet.getState();
+            Block block = state.getBlock();
+            
+            // Only care about blocks below Y=20
+            if (pos.getY() <= MAX_RENDER_Y) {
+                LeakedBlockData leaked = leakedBlocks.get(pos);
+                if (leaked == null) {
+                    leaked = new LeakedBlockData(pos, block, "block_update");
+                    leakedBlocks.put(pos, leaked);
+                }
+                leaked.block = block;
+                leaked.state = state;
+                leaked.lastSeen = System.currentTimeMillis();
+                
+                // Check for redstone power
+                if (block instanceof RedstoneWireBlock) {
+                    int power = state.get(RedstoneWireBlock.POWER);
+                    if (power > 0) {
+                        leaked.isRedstonePowered = true;
+                        leaked.redstonePower = power;
+                        redstoneActivity.put(pos, new RedstoneActivity(pos, power));
+                    }
+                }
+                
+                // Check for powered repeaters/comparators
+                if (block instanceof RepeaterBlock && state.get(RepeaterBlock.POWERED)) {
+                    leaked.isRedstonePowered = true;
+                    leaked.redstonePower = 15;
+                }
+                if (block instanceof ComparatorBlock && state.get(ComparatorBlock.POWERED)) {
+                    leaked.isRedstonePowered = true;
+                    leaked.redstonePower = 15;
+                }
+                
+                // Log interesting discoveries
+                if (block == Blocks.SPAWNER || (leaked.isRedstonePowered && leaked.redstonePower > 0)) {
+                    ChatUtils.info("EntityDebug", "§cFound " + block.getName().getString() + " at [" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "]");
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void analyzeChunkDeltaPacket(ChunkDeltaUpdateS2CPacket packet) {
+        try {
+            // Use reflection to extract multiple block updates
+            for (Field f : packet.getClass().getDeclaredFields()) {
+                if (Map.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    Map<?, ?> updates = (Map<?, ?>) f.get(packet);
+                    for (Map.Entry<?, ?> entry : updates.entrySet()) {
+                        try {
+                            long posLong = (long) entry.getKey();
+                            BlockState state = (BlockState) entry.getValue();
+                            int x = (int)(posLong >> 38);
+                            int y = (int)(posLong << 52 >> 52);
+                            int z = (int)(posLong << 26 >> 38);
+                            BlockPos pos = new BlockPos(x, y, z);
+                            
+                            if (y <= MAX_RENDER_Y) {
+                                LeakedBlockData leaked = leakedBlocks.get(pos);
+                                if (leaked == null) {
+                                    leaked = new LeakedBlockData(pos, state.getBlock(), "chunk_delta");
+                                    leakedBlocks.put(pos, leaked);
+                                }
+                                leaked.state = state;
+                                leaked.lastSeen = System.currentTimeMillis();
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void analyzeBlockEntityPacket(BlockEntityUpdateS2CPacket packet) {
+        try {
+            BlockPos pos = packet.getPos();
+            if (pos.getY() <= MAX_RENDER_Y) {
+                String type = packet.getBlockEntityType().toString();
+                LeakedBlockEntityData leaked = leakedBlockEntities.get(pos);
+                if (leaked == null) {
+                    leaked = new LeakedBlockEntityData(pos, type);
+                    leakedBlockEntities.put(pos, leaked);
+                    ChatUtils.info("EntityDebug", "§eFound " + type + " at [" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "]");
+                }
+                leaked.lastSeen = System.currentTimeMillis();
+                
+                // Extract NBT data if available
+                if (packet.getNbt() != null) {
+                    var nbt = packet.getNbt();
+                    for (String key : nbt.getKeys()) {
+                        leaked.data.put(key, nbt.get(key));
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+    
+    private void analyzeChunkDataPacket(ChunkDataS2CPacket packet) {
+        try {
+            ChunkPos chunkPos = packet.getChunkPos();
+            int chunkX = chunkPos.x;
+            int chunkZ = chunkPos.z;
+            
+            ChunkLeakData chunkData = leakedChunkData.get(chunkPos);
+            if (chunkData == null) {
+                chunkData = new ChunkLeakData(chunkPos);
+                leakedChunkData.put(chunkPos, chunkData);
+            }
+            chunkData.lastSeen = System.currentTimeMillis();
+            
+        } catch (Exception ignored) {}
+    }
+    
+    // ============================================================
+    // BYPASS TECHNIQUE 3: ACTIVE REDSTONE DETECTION
+    // Detects redstone activity even when hidden
+    // ============================================================
+    
+    private void detectRedstoneActivity() {
+        if (mc.world == null) return;
+        
+        // Scan for redstone components in loaded chunks below Y=20
+        int radius = SCAN_RADIUS;
+        BlockPos p = mc.player.getBlockPos();
+        
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                for (int dy = -20; dy <= MAX_RENDER_Y - p.getY(); dy++) {
+                    BlockPos pos = p.add(dx, dy, dz);
+                    if (pos.getY() > MAX_RENDER_Y) continue;
+                    
+                    BlockState state = mc.world.getBlockState(pos);
+                    Block block = state.getBlock();
+                    
+                    // Check for powered redstone components
+                    int power = 0;
+                    if (block instanceof RedstoneWireBlock) {
+                        power = state.get(RedstoneWireBlock.POWER);
+                    } else if (block instanceof RepeaterBlock && state.get(RepeaterBlock.POWERED)) {
+                        power = 15;
+                    } else if (block instanceof ComparatorBlock && state.get(ComparatorBlock.POWERED)) {
+                        power = 15;
+                    } else if (block instanceof RedstoneTorchBlock && state.get(RedstoneTorchBlock.LIT)) {
+                        power = 15;
+                    } else if (block instanceof LeverBlock && state.get(LeverBlock.POWERED)) {
+                        power = 15;
+                    } else if (block instanceof ButtonBlock && state.get(ButtonBlock.POWERED)) {
+                        power = 15;
+                    }
+                    
+                    if (power > 0) {
+                        LeakedBlockData leaked = leakedBlocks.get(pos);
+                        if (leaked == null) {
+                            leaked = new LeakedBlockData(pos, block, "redstone_scan");
+                            leakedBlocks.put(pos, leaked);
+                        }
+                        leaked.isRedstonePowered = true;
+                        leaked.redstonePower = power;
+                        leaked.lastSeen = System.currentTimeMillis();
+                        
+                        redstoneActivity.put(pos, new RedstoneActivity(pos, power));
+                    }
+                }
+            }
+        }
+    }
+    
+    // ============================================================
+    // BYPASS TECHNIQUE 4: CLIENT STATUS TRIGGER
     // ============================================================
     
     private void clientStatusBypass() {
         if (mc.player == null || mc.getNetworkHandler() == null) return;
         
-        // Every 100 ticks (5 seconds)
-        if (bypassTick % 100 == 0) {
+        if (bypassTick % 80 == 0) { // Every 4 seconds
             try {
-                // Send open inventory action - forces entity update without opening GUI
                 ClientCommandC2SPacket commandPacket = new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY);
                 mc.getNetworkHandler().sendPacket(commandPacket);
             } catch (Exception ignored) {}
@@ -160,17 +412,14 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // BYPASS TECHNIQUE 3: CHUNK REFRESH TRIGGER
-    // Makes server resend chunk data including entities
+    // BYPASS TECHNIQUE 5: KEEP ALIVE TRIGGER
     // ============================================================
     
-    private void chunkRefreshBypass() {
+    private void keepAliveBypass() {
         if (mc.player == null || mc.getNetworkHandler() == null) return;
         
-        // Every 60 ticks (3 seconds)
-        if (bypassTick % 60 == 0) {
+        if (bypassTick % 50 == 0) { // Every 2.5 seconds
             try {
-                // Send keep alive with specific timing to trigger refresh
                 KeepAliveC2SPacket keepAlive = new KeepAliveC2SPacket((int)(System.currentTimeMillis() / 1000));
                 mc.getNetworkHandler().sendPacket(keepAlive);
             } catch (Exception ignored) {}
@@ -178,190 +427,93 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // BYPASS TECHNIQUE 4: POSITION JITTER (UNDETECTABLE)
-    // Tiny movements that don't trigger anti-cheat but force updates
+    // ACTIVE BLOCK SCANNING (What the server actually has)
     // ============================================================
     
-    private void positionJitterBypass() {
-        if (mc.player == null || mc.getNetworkHandler() == null) return;
-        
-        // Every 15 ticks (0.75 seconds) - very subtle
-        if (bypassTick % 15 == 0) {
-            try {
-                // 0.0001 block movement - imperceptible to anti-cheat
-                double jitter = 0.0001;
-                PlayerMoveC2SPacket.PositionAndOnGround movePacket = new PlayerMoveC2SPacket.PositionAndOnGround(
-                    mc.player.getX() + jitter,
-                    mc.player.getY(),
-                    mc.player.getZ() + jitter,
-                    mc.player.isOnGround(),
-                    false);
-                mc.getNetworkHandler().sendPacket(movePacket);
-            } catch (Exception ignored) {}
-        }
-    }
-    
-    // ============================================================
-    // ENTITY CAPTURE FROM PACKETS
-    // Captures entities as server sends them
-    // ============================================================
-    
-    @EventHandler
-    private void onPacketReceive(PacketEvent.Receive event) {
-        if (!isActive) return;
-        
-        // Capture entity spawn packets (these contain hidden entities)
-        if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
-            try {
-                int id = getEntityIdFromPacket(spawnPacket);
-                double x = getEntityXFromPacket(spawnPacket);
-                double y = getEntityYFromPacket(spawnPacket);
-                double z = getEntityZFromPacket(spawnPacket);
-                EntityType<?> type = getEntityTypeFromPacket(spawnPacket);
-                
-                if (!leakedEntities.containsKey(id)) {
-                    leakedEntities.put(id, new LeakedEntity(id, type, x, y, z, "packet_capture"));
-                    if (y <= MAX_RENDER_Y) {
-                        ChatUtils.info("EntityDebug", "§aLeaked entity at Y=" + (int)y + " - " + type.getName().getString());
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-        
-        // Track entity destructions
-        if (event.packet instanceof EntitiesDestroyS2CPacket destroyPacket) {
-            for (int id : destroyPacket.getEntityIds()) {
-                leakedEntities.remove(id);
-            }
-        }
-    }
-    
-    private int getEntityIdFromPacket(EntitySpawnS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == int.class) {
-                    f.setAccessible(true);
-                    return f.getInt(packet);
-                }
-            }
-        } catch (Exception e) {}
-        return -1;
-    }
-    
-    private double getEntityXFromPacket(EntitySpawnS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == double.class) {
-                    f.setAccessible(true);
-                    return f.getDouble(packet);
-                }
-            }
-        } catch (Exception e) {}
-        return 0;
-    }
-    
-    private double getEntityYFromPacket(EntitySpawnS2CPacket packet) {
-        try {
-            // Y is usually the second double field
-            int doubleCount = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == double.class) {
-                    f.setAccessible(true);
-                    doubleCount++;
-                    if (doubleCount == 2) return f.getDouble(packet);
-                }
-            }
-        } catch (Exception e) {}
-        return 0;
-    }
-    
-    private double getEntityZFromPacket(EntitySpawnS2CPacket packet) {
-        try {
-            int doubleCount = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == double.class) {
-                    f.setAccessible(true);
-                    doubleCount++;
-                    if (doubleCount == 3) return f.getDouble(packet);
-                }
-            }
-        } catch (Exception e) {}
-        return 0;
-    }
-    
-    private EntityType<?> getEntityTypeFromPacket(EntitySpawnS2CPacket packet) {
-        try {
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                if (f.getType() == int.class || f.getType() == Integer.class) {
-                    f.setAccessible(true);
-                    int typeId = f.getInt(packet);
-                    // Map common entity types
-                    if (typeId == 1) return EntityType.PLAYER;
-                    if (typeId == 2) return EntityType.ZOMBIE;
-                    if (typeId == 3) return EntityType.SKELETON;
-                    if (typeId == 4) return EntityType.SPIDER;
-                    if (typeId == 5) return EntityType.CREEPER;
-                    if (typeId == 6) return EntityType.ENDERMAN;
-                    if (typeId == 7) return EntityType.VILLAGER;
-                    if (typeId == 8) return EntityType.ARMOR_STAND;
-                    if (typeId == 9) return EntityType.CHEST_MINECART;
-                    if (typeId == 10) return EntityType.ITEM;
-                }
-            }
-        } catch (Exception e) {}
-        return EntityType.PIG;
-    }
-    
-    // ============================================================
-    // NORMAL ENTITY SCANNING (FALLBACK)
-    // ============================================================
-    
-    private void scanVisibleEntities() {
-        if (mc.world == null) return;
-        
-        for (Entity e : mc.world.getEntities()) {
-            if (e == mc.player) continue;
-            if (!leakedEntities.containsKey(e.getId())) {
-                leakedEntities.put(e.getId(), new LeakedEntity(e.getId(), e.getType(), e.getX(), e.getY(), e.getZ(), "visible"));
-            }
-        }
-    }
-    
-    // ============================================================
-    // BLOCK SCANNING
-    // ============================================================
-    
-    private void scanImportantBlocks() {
+    private void activeBlockScan() {
         if (mc.world == null || mc.player == null) return;
         
         BlockPos p = mc.player.getBlockPos();
-        int radius = 32;
+        int radius = SCAN_RADIUS;
         
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -20; dy <= MAX_RENDER_Y; dy++) {
+                for (int dy = -20; dy <= MAX_RENDER_Y - p.getY(); dy++) {
                     BlockPos pos = p.add(dx, dy, dz);
-                    if (pos.getY() > MAX_RENDER_Y) continue;
+                    if (pos.getY() > MAX_RENDER_Y || pos.getY() < mc.world.getBottomY()) continue;
                     
-                    Block block = mc.world.getBlockState(pos).getBlock();
-                    if (isValuableBlock(block)) {
-                        if (!leakedBlocks.containsKey(pos)) {
-                            leakedBlocks.put(pos, new LeakedBlock(pos, block));
+                    BlockState state = mc.world.getBlockState(pos);
+                    Block block = state.getBlock();
+                    
+                    if (isImportantBlock(block)) {
+                        LeakedBlockData leaked = leakedBlocks.get(pos);
+                        if (leaked == null) {
+                            leaked = new LeakedBlockData(pos, block, "active_scan");
+                            leakedBlocks.put(pos, leaked);
+                            if (block == Blocks.SPAWNER) {
+                                ChatUtils.info("EntityDebug", "§cSCANNER: Found SPAWNER at [" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "]");
+                            }
                         }
+                        leaked.lastSeen = System.currentTimeMillis();
+                        leaked.state = state;
                     }
                 }
             }
         }
+        
+        // Clean up old entries
+        leakedBlocks.entrySet().removeIf(entry -> !entry.getValue().isRecent());
+        leakedBlockEntities.entrySet().removeIf(entry -> !entry.getValue().isBelowY20());
+        redstoneActivity.entrySet().removeIf(entry -> !entry.getValue().isActive());
     }
     
-    private boolean isValuableBlock(Block block) {
+    private boolean isImportantBlock(Block block) {
         return block == Blocks.SPAWNER ||
                block == Blocks.CHEST ||
                block == Blocks.TRAPPED_CHEST ||
                block == Blocks.ENDER_CHEST ||
                block == Blocks.BEACON ||
                block == Blocks.FURNACE ||
-               block == Blocks.BLAST_FURNACE;
+               block == Blocks.BLAST_FURNACE ||
+               block == Blocks.SMOKER ||
+               block == Blocks.HOPPER ||
+               block == Blocks.DROPPER ||
+               block == Blocks.DISPENSER ||
+               block == Blocks.OBSERVER ||
+               block == Blocks.REPEATER ||
+               block == Blocks.COMPARATOR ||
+               block == Blocks.REDSTONE_WIRE ||
+               block == Blocks.REDSTONE_TORCH ||
+               block == Blocks.LEVER ||
+               block instanceof ButtonBlock ||
+               block instanceof PistonBlock ||
+               block == Blocks.NOTE_BLOCK ||
+               block == Blocks.JUKEBOX ||
+               block == Blocks.SHULKER_BOX ||
+               block == Blocks.BLACK_SHULKER_BOX ||
+               block == Blocks.BLUE_SHULKER_BOX ||
+               block == Blocks.BROWN_SHULKER_BOX ||
+               block == Blocks.CYAN_SHULKER_BOX ||
+               block == Blocks.GRAY_SHULKER_BOX ||
+               block == Blocks.GREEN_SHULKER_BOX ||
+               block == Blocks.LIGHT_BLUE_SHULKER_BOX ||
+               block == Blocks.LIGHT_GRAY_SHULKER_BOX ||
+               block == Blocks.LIME_SHULKER_BOX ||
+               block == Blocks.MAGENTA_SHULKER_BOX ||
+               block == Blocks.ORANGE_SHULKER_BOX ||
+               block == Blocks.PINK_SHULKER_BOX ||
+               block == Blocks.PURPLE_SHULKER_BOX ||
+               block == Blocks.RED_SHULKER_BOX ||
+               block == Blocks.WHITE_SHULKER_BOX ||
+               block == Blocks.YELLOW_SHULKER_BOX ||
+               block == Blocks.ANVIL ||
+               block == Blocks.ENCHANTING_TABLE ||
+               block == Blocks.GRINDSTONE ||
+               block == Blocks.LOOM ||
+               block == Blocks.CARTOGRAPHY_TABLE ||
+               block == Blocks.STONECUTTER ||
+               block == Blocks.SMITHING_TABLE ||
+               block == Blocks.FLETCHING_TABLE;
     }
     
     // ============================================================
@@ -373,31 +525,31 @@ public class EntityDebug extends Module {
         if (!isActive || mc.world == null || mc.player == null) return;
         
         // Run all bypass techniques
-        sequenceManipulationBypass();
+        forceChunkDataResend();
         clientStatusBypass();
-        chunkRefreshBypass();
-        positionJitterBypass();
+        keepAliveBypass();
         
-        // Scan for blocks
-        scanImportantBlocks();
-        
-        // Fallback scanning
-        scanVisibleEntities();
+        // Active scanning
+        activeBlockScan();
+        detectRedstoneActivity();
         
         // Update render cache
-        if (System.currentTimeMillis() - lastRenderUpdate > 100) {
+        if (System.currentTimeMillis() - lastPacketAnalysis > 100) {
             renderCache.clear();
-            for (LeakedEntity entity : leakedEntities.values()) {
-                if (entity.isRecent() && entity.isBelowY25()) {
-                    renderCache.put(entity.id, entity.getBoundingBox());
-                }
-            }
-            for (LeakedBlock block : leakedBlocks.values()) {
-                if (block.isBelowY25()) {
+            
+            for (LeakedBlockData block : leakedBlocks.values()) {
+                if (block.isBelowY20() && block.isRecent()) {
                     renderCache.put(block.pos.hashCode(), block.getBoundingBox());
                 }
             }
-            lastRenderUpdate = System.currentTimeMillis();
+            
+            for (LeakedBlockEntityData blockEntity : leakedBlockEntities.values()) {
+                if (blockEntity.isBelowY20()) {
+                    renderCache.put(blockEntity.pos.hashCode(), blockEntity.getBoundingBox());
+                }
+            }
+            
+            lastPacketAnalysis = System.currentTimeMillis();
         }
     }
     
@@ -421,10 +573,18 @@ public class EntityDebug extends Module {
             double dz = box.getCenter().z - pz;
             if (dx * dx + dz * dz > RENDER_DISTANCE * RENDER_DISTANCE) continue;
             
+            // Check if this block has active redstone
+            BlockPos pos = new BlockPos((int)box.minX, (int)box.minY, (int)box.minZ);
+            LeakedBlockData blockData = leakedBlocks.get(pos);
+            boolean isRedstoneActive = blockData != null && blockData.isRedstonePowered;
+            
+            Color fill = isRedstoneActive ? REDSTONE_FILL : ESP_FILL;
+            Color line = isRedstoneActive ? REDSTONE_COLOR : ESP_COLOR;
+            
             event.renderer.box(
                 box.minX, box.minY, box.minZ,
                 box.maxX, box.maxY, box.maxZ,
-                ESP_FILL, ESP_COLOR, ShapeMode.Both, 0
+                fill, line, ShapeMode.Both, 0
             );
         }
     }
@@ -443,31 +603,37 @@ public class EntityDebug extends Module {
         isActive = true;
         bypassTick = 0;
         lastSequenceId = 0;
-        leakedEntities.clear();
         leakedBlocks.clear();
+        leakedBlockEntities.clear();
+        leakedChunkData.clear();
+        redstoneActivity.clear();
         renderCache.clear();
         
         ChatUtils.info("EntityDebug", "§c§lDONUT BYPASS ACTIVATED");
-        ChatUtils.info("EntityDebug", "§7- Forcing entity leakage");
-        ChatUtils.info("EntityDebug", "§7- Scanning below Y=25");
-        ChatUtils.info("EntityDebug", "§7- Bypass methods active");
+        ChatUtils.info("EntityDebug", "§7- Extracting server data below Y=20");
+        ChatUtils.info("EntityDebug", "§7- Monitoring: Spawners, Chests, Beacons");
+        ChatUtils.info("EntityDebug", "§7- Redstone detection: ACTIVE");
+        ChatUtils.info("EntityDebug", "§7- Block Entities: ALL");
         
-        mc.player.sendMessage(Text.literal("§8[§c§lED§8] §7Entity Debug §aACTIVE §7- Forcing entity leakage"), false);
+        mc.player.sendMessage(Text.literal("§8[§c§lED§8] §7Server Data Extractor §aACTIVE"), false);
     }
     
     @Override
     public void onDeactivate() {
         isActive = false;
-        leakedEntities.clear();
         leakedBlocks.clear();
+        leakedBlockEntities.clear();
+        leakedChunkData.clear();
+        redstoneActivity.clear();
         renderCache.clear();
         ChatUtils.info("EntityDebug", "§cEntity Debug deactivated");
     }
     
     @Override
     public String getInfoString() {
-        int belowY = (int) leakedEntities.values().stream().filter(e -> e.y <= MAX_RENDER_Y).count();
-        int blocks = leakedBlocks.size();
-        return String.format("§c%d §7leaked §8| §c%d §7blocks", belowY, blocks);
+        int blocks = (int) leakedBlocks.values().stream().filter(b -> b.isBelowY20()).count();
+        int redstone = (int) redstoneActivity.values().stream().filter(r -> r.isActive()).count();
+        int entities = leakedBlockEntities.size();
+        return String.format("§c%d §7blocks §8| §c%d §7redstone §8| §c%d §7entities", blocks, redstone, entities);
     }
 }
