@@ -30,33 +30,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * KRYPTON-STYLE ENTITY DEBUG - 1.21.11 COMPATIBLE
- * 
- * This module captures ALL 8 server data channels:
- * 1. NBT (Block Entity Data) - Full structured data from chunk & update packets
- * 2. Packets - ChunkData, BlockEntityUpdate, BlockUpdate, ChunkDelta, BlockEvent
- * 3. BlockState - Redstone power levels, powered states, comparator mode
- * 4. Container Sync - Inventory override system (indirect via container events)
- * 5. Block Events - Piston movement, chest open, note block play
- * 6. Server Tick Updates - 20 TPS simulation reflected via block updates
- * 7. Comparator Output System - Derived signal from containers/furnaces
- * 8. Chunk Section Data - Bulk world sync on chunk load
- * 
- * Features:
- * - Silent operation (no chat spam, only new discoveries)
- * - ESP boxes below Y=18 (light blue)
- * - Clean tracers from crosshair to detected locations
- * - Real-time detection of spawners, chests, furnaces, beacons, redstone, comparators
- * 
- * @author Glazed Development
- * @version 2.0.0
- * @since 2026
- */
 public class EntityDebug extends Module {
     
     // ============================================================
-    // ANTI-SPAM TRACKING
+    // SECTION 1: ANTI-SPAM TRACKING (Lines 70-95)
     // ============================================================
     
     private final Set<BlockPos> notifiedSpawners = ConcurrentHashMap.newKeySet();
@@ -69,7 +46,7 @@ public class EntityDebug extends Module {
     private final AtomicInteger messageThrottle = new AtomicInteger(0);
     
     // ============================================================
-    // ESP AND TRACER STORAGE
+    // SECTION 2: ESP AND TRACER STORAGE (Lines 97-105)
     // ============================================================
     
     private final CopyOnWriteArrayList<EspBox> espBoxes = new CopyOnWriteArrayList<>();
@@ -77,7 +54,7 @@ public class EntityDebug extends Module {
     private final CopyOnWriteArrayList<TracerPoint> tempTracers = new CopyOnWriteArrayList<>();
     
     // ============================================================
-    // 8 CHANNEL DATA STORAGE
+    // SECTION 3: 8 CHANNEL DATA STORAGE (Lines 107-135)
     // ============================================================
     
     // Channel 1: NBT Block Entity Data
@@ -101,7 +78,7 @@ public class EntityDebug extends Module {
     private final Map<Integer, EntityRecord> entityRecords = new ConcurrentHashMap<>();
     
     // ============================================================
-    // STATE VARIABLES
+    // SECTION 4: STATE VARIABLES (Lines 137-148)
     // ============================================================
     
     private boolean moduleActive = false;
@@ -112,7 +89,7 @@ public class EntityDebug extends Module {
     private int currentRenderDistance = 96;
     
     // ============================================================
-    // CONSTANTS
+    // SECTION 5: CONSTANTS (Lines 150-172)
     // ============================================================
     
     private static final int MAX_RENDER_DIST = 96;
@@ -126,13 +103,17 @@ public class EntityDebug extends Module {
     private static final int SCAN_RADIUS = 48;
     
     // ============================================================
-    // COLORS - Light blue theme for ESP
+    // SECTION 6: COLORS (Lines 174-190)
     // ============================================================
     
+    // ESP Colors - All light blue for consistency
     private static final Color ESP_FILL = new Color(100, 150, 255, 60);
     private static final Color ESP_LINE = new Color(100, 150, 255, 200);
     private static final Color TRACER_COLOR = new Color(100, 150, 255, 180);
-    private static final Color ACTIVE_REDSTONE_COLOR = new Color(255, 100, 100, 200);
+    
+    // Redstone uses same light blue for ESP (per user request all light blue)
+    private static final Color REDSTONE_ESP_COLOR = new Color(100, 150, 255, 200);
+    private static final Color REDSTONE_ESP_FILL = new Color(100, 150, 255, 60);
     
     // HUD Colors (for info string only, not ESP)
     private static final Color HUD_SPAWNER = new Color(255, 80, 80, 255);
@@ -141,7 +122,7 @@ public class EntityDebug extends Module {
     private static final Color HUD_BEACON = new Color(80, 200, 255, 255);
     
     // ============================================================
-    // CONSTRUCTOR
+    // SECTION 7: CONSTRUCTOR (Lines 192-196)
     // ============================================================
     
     public EntityDebug() {
@@ -149,9 +130,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // DATA RECORD CLASSES
+    // SECTION 8: DATA RECORD CLASSES (Lines 198-310)
     // ============================================================
     
+    /**
+     * Spawner Record - Stores spawner data from NBT packets
+     * Channel 1: NBT Block Entity Data
+     */
     private static class SpawnerRecord {
         final BlockPos pos;
         String entityType;
@@ -162,6 +147,10 @@ public class EntityDebug extends Module {
         void update() { lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Chest Record - Stores chest data from NBT packets
+     * Channel 1: NBT Block Entity Data
+     */
     private static class ChestRecord {
         final BlockPos pos;
         int itemCount;
@@ -173,6 +162,10 @@ public class EntityDebug extends Module {
         void update() { lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Furnace Record - Stores furnace data from NBT packets
+     * Channel 1: NBT Block Entity Data
+     */
     private static class FurnaceRecord {
         final BlockPos pos;
         boolean isBurning;
@@ -184,6 +177,10 @@ public class EntityDebug extends Module {
         void update() { lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Beacon Record - Stores beacon data from NBT packets
+     * Channel 1: NBT Block Entity Data
+     */
     private static class BeaconRecord {
         final BlockPos pos;
         int powerLevel;
@@ -195,6 +192,10 @@ public class EntityDebug extends Module {
         void update() { lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Redstone Record - Stores redstone power levels
+     * Channel 3: BlockState
+     */
     private static class RedstoneRecord {
         final BlockPos pos;
         int powerLevel;
@@ -206,6 +207,10 @@ public class EntityDebug extends Module {
         void update(int power) { powerLevel = power; lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Comparator Record - Stores comparator output signals
+     * Channel 7: Comparator Output System (Derived Data)
+     */
     private static class ComparatorRecord {
         final BlockPos pos;
         int outputSignal;
@@ -217,6 +222,9 @@ public class EntityDebug extends Module {
         void update(int output) { outputSignal = output; lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * Entity Record - Stores entity tracking data
+     */
     private static class EntityRecord {
         final int id;
         double yCoord;
@@ -227,6 +235,9 @@ public class EntityDebug extends Module {
         void update(double y) { yCoord = y; lastSeen = System.currentTimeMillis(); }
     }
     
+    /**
+     * ESP Box - Stores rendering data for ESP visualization
+     */
     private static class EspBox {
         final Box boundingBox;
         final Color fillColor;
@@ -234,6 +245,9 @@ public class EntityDebug extends Module {
         EspBox(Box box, Color fill, Color line) { boundingBox = box; fillColor = fill; lineColor = line; }
     }
     
+    /**
+     * Tracer Point - Stores tracer visualization data
+     */
     private static class TracerPoint {
         final Vec3d position;
         final long creationTime;
@@ -242,34 +256,34 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // PACKET CAPTURE - ALL 8 CHANNELS (SILENT)
+    // SECTION 9: PACKET CAPTURE - ALL 8 CHANNELS (Lines 312-370)
     // ============================================================
     
     @EventHandler
     private void onPacketReceived(PacketEvent.Receive event) {
         if (!moduleActive) return;
         
-        // Channel 1 & 8: Chunk Data
+        // Channel 1 & 8: Chunk Data (bulk world sync)
         if (event.packet instanceof ChunkDataS2CPacket packet) {
             processChunkData(packet);
         }
         
-        // Channel 1: Block Entity Update
+        // Channel 1: Block Entity Update (NBT data)
         if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
             processBlockEntityUpdate(packet);
         }
         
-        // Channel 2 & 3: Block Update
+        // Channel 2 & 3: Block Update (state changes, redstone power)
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
             processBlockUpdate(packet);
         }
         
-        // Channel 2 & 5: Block Event
+        // Channel 2 & 5: Block Event (actions/animations)
         if (event.packet instanceof BlockEventS2CPacket packet) {
             processBlockEvent(packet);
         }
         
-        // Channel 4: Container Sync
+        // Channel 4: Container Sync (inventory override)
         if (event.packet instanceof OpenScreenS2CPacket packet) {
             processContainerSync(packet);
         }
@@ -281,9 +295,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // CHANNEL 1 & 8: CHUNK DATA PROCESSING
+    // SECTION 10: CHANNEL 1 & 8 - CHUNK DATA PROCESSING (Lines 372-395)
     // ============================================================
     
+    /**
+     * Processes chunk data packets (Channel 8: Chunk Section Data)
+     * Captures bulk world sync information when chunks load
+     */
     private void processChunkData(ChunkDataS2CPacket packet) {
         try {
             int chunkX = 0, chunkZ = 0;
@@ -299,9 +317,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // CHANNEL 1: NBT BLOCK ENTITY DATA PROCESSING
+    // SECTION 11: CHANNEL 1 - NBT BLOCK ENTITY DATA PROCESSING (Lines 397-500)
     // ============================================================
     
+    /**
+     * Processes block entity update packets (Channel 1: NBT Block Entity Data)
+     * Extracts NBT data from spawners, chests, furnaces, beacons
+     */
     private void processBlockEntityUpdate(BlockEntityUpdateS2CPacket packet) {
         try {
             BlockPos position = packet.getPos();
@@ -329,6 +351,9 @@ public class EntityDebug extends Module {
         } catch (Exception ignored) {}
     }
     
+    /**
+     * Extracts spawner data from NBT including entity type
+     */
     private void processSpawnerData(BlockPos pos, NbtCompound nbt) {
         SpawnerRecord record = spawnerRecords.computeIfAbsent(pos, k -> new SpawnerRecord(pos));
         try {
@@ -347,6 +372,9 @@ public class EntityDebug extends Module {
         } catch (Exception ignored) {}
     }
     
+    /**
+     * Extracts chest data from NBT including item count
+     */
     private void processChestData(BlockPos pos, NbtCompound nbt) {
         ChestRecord record = chestRecords.computeIfAbsent(pos, k -> new ChestRecord(pos));
         try {
@@ -361,6 +389,9 @@ public class EntityDebug extends Module {
         } catch (Exception ignored) {}
     }
     
+    /**
+     * Extracts furnace data from NBT including burning status
+     */
     private void processFurnaceData(BlockPos pos, NbtCompound nbt) {
         FurnaceRecord record = furnaceRecords.computeIfAbsent(pos, k -> new FurnaceRecord(pos));
         try {
@@ -376,6 +407,9 @@ public class EntityDebug extends Module {
         } catch (Exception ignored) {}
     }
     
+    /**
+     * Extracts beacon data from NBT including power level
+     */
     private void processBeaconData(BlockPos pos, NbtCompound nbt) {
         BeaconRecord record = beaconRecords.computeIfAbsent(pos, k -> new BeaconRecord(pos));
         try {
@@ -391,9 +425,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // CHANNEL 2 & 3: BLOCK STATE PROCESSING (Redstone)
+    // SECTION 12: CHANNEL 2 & 3 - BLOCK STATE PROCESSING (Lines 502-600)
     // ============================================================
     
+    /**
+     * Processes block update packets (Channel 2 & 3: BlockState)
+     * Detects redstone power levels, comparator outputs
+     */
     private void processBlockUpdate(BlockUpdateS2CPacket packet) {
         try {
             BlockPos position = packet.getPos();
@@ -410,6 +448,9 @@ public class EntityDebug extends Module {
         } catch (Exception ignored) {}
     }
     
+    /**
+     * Processes redstone wire updates (Channel 3: BlockState - Redstone power)
+     */
     private void processRedstoneWire(BlockPos pos, BlockUpdateS2CPacket packet) {
         int powerLevel = extractRedstonePower(packet);
         if (powerLevel > 0) {
@@ -432,6 +473,9 @@ public class EntityDebug extends Module {
         }
     }
     
+    /**
+     * Processes comparator updates (Channel 7: Comparator Output System)
+     */
     private void processComparator(BlockPos pos, BlockUpdateS2CPacket packet) {
         int outputValue = extractComparatorOutput(packet);
         if (outputValue > 0) {
@@ -447,9 +491,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // CHANNEL 2 & 5: BLOCK EVENTS PROCESSING
+    // SECTION 13: CHANNEL 2 & 5 - BLOCK EVENTS (Lines 602-630)
     // ============================================================
     
+    /**
+     * Processes block event packets (Channel 5: Block Events)
+     * Silent capture - no chat messages to avoid spam
+     */
     private void processBlockEvent(BlockEventS2CPacket packet) {
         try {
             BlockPos position = packet.getPos();
@@ -462,17 +510,21 @@ public class EntityDebug extends Module {
                 }
             }
             
-            // Silent capture - no chat messages
+            // Silent capture - no chat messages to avoid spam
             if (position.getY() <= MAX_DETECTION_Y) {
-                // Event detected but not logged to avoid spam
+                // Event detected but not logged
             }
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // CHANNEL 4: CONTAINER SYNC PROCESSING
+    // SECTION 14: CHANNEL 4 - CONTAINER SYNC (Lines 632-645)
     // ============================================================
     
+    /**
+     * Processes container sync packets (Channel 4: Container Sync)
+     * Silent capture - no chat messages
+     */
     private void processContainerSync(OpenScreenS2CPacket packet) {
         try {
             int syncIdentifier = packet.getSyncId();
@@ -481,9 +533,12 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // ENTITY SPAWN PROCESSING
+    // SECTION 15: ENTITY SPAWN PROCESSING (Lines 647-670)
     // ============================================================
     
+    /**
+     * Processes entity spawn packets
+     */
     private void processEntitySpawn(EntitySpawnS2CPacket packet) {
         try {
             int entityId = -1;
@@ -500,9 +555,12 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // HELPER METHODS FOR PACKET EXTRACTION
+    // SECTION 16: HELPER METHODS FOR PACKET EXTRACTION (Lines 672-760)
     // ============================================================
     
+    /**
+     * Extracts Block object from BlockUpdateS2CPacket using reflection
+     */
     private Block extractBlockFromPacket(BlockUpdateS2CPacket packet) {
         try {
             for (Field field : packet.getClass().getDeclaredFields()) {
@@ -521,6 +579,9 @@ public class EntityDebug extends Module {
         return Blocks.AIR;
     }
     
+    /**
+     * Extracts redstone power level from BlockUpdateS2CPacket using reflection
+     */
     private int extractRedstonePower(BlockUpdateS2CPacket packet) {
         try {
             for (Field field : packet.getClass().getDeclaredFields()) {
@@ -540,6 +601,9 @@ public class EntityDebug extends Module {
         return 0;
     }
     
+    /**
+     * Extracts comparator output from BlockUpdateS2CPacket using reflection
+     */
     private int extractComparatorOutput(BlockUpdateS2CPacket packet) {
         try {
             for (Field field : packet.getClass().getDeclaredFields()) {
@@ -560,9 +624,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // NOTIFICATION SYSTEM (NO SPAM)
+    // SECTION 17: NOTIFICATION SYSTEM (Lines 762-795)
     // ============================================================
     
+    /**
+     * Sends a chat notification with anti-spam protection
+     * Only sends one notification per block type every GLOBAL_COOLDOWN_MS
+     */
     private void sendNotification(String detectionType, int yLevel, String colorCode) {
         // Check global cooldown for this detection type
         AtomicLong lastGlobal = globalCooldown.computeIfAbsent(detectionType, k -> new AtomicLong(0));
@@ -573,15 +641,21 @@ public class EntityDebug extends Module {
         lastGlobal.set(System.currentTimeMillis());
     }
     
+    /**
+     * Schedules a cooldown to prevent message spam
+     */
     private void scheduleCooldown() {
         messageThrottle.incrementAndGet();
-        // Will be decremented in tick handler
     }
     
     // ============================================================
-    // CHANNEL 6: SERVER TICK DETECTION
+    // SECTION 18: CHANNEL 6 - SERVER TICK DETECTION (Lines 797-825)
     // ============================================================
     
+    /**
+     * Analyzes server tick activity by tracking redstone change frequency
+     * Channel 6: Server Tick Updates (implicit system)
+     */
     private void analyzeServerTickActivity() {
         for (Map.Entry<BlockPos, AtomicInteger> frequencyEntry : redstoneChangeFreq.entrySet()) {
             BlockPos position = frequencyEntry.getKey();
@@ -601,9 +675,14 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // CHANNEL 7: UPDATE COMPARATOR OUTPUTS (Derived Signal)
+    // SECTION 19: CHANNEL 7 - DERIVED COMPARATOR SIGNALS (Lines 827-860)
     // ============================================================
     
+    /**
+     * Updates derived comparator outputs based on container inventories
+     * Channel 7: Comparator Output System (derived data)
+     * NOT sent directly - computed from NBT and BlockState
+     */
     private void updateDerivedComparatorSignals() {
         for (Map.Entry<BlockPos, ComparatorRecord> comparatorEntry : comparatorRecords.entrySet()) {
             BlockPos comparatorPos = comparatorEntry.getKey();
@@ -626,16 +705,20 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // ESP VISUALIZATION UPDATE
+    // SECTION 20: ESP VISUALIZATION UPDATE (Lines 862-950)
     // ============================================================
     
+    /**
+     * Refreshes ESP visualization boxes
+     * All ESP uses light blue colors for consistency
+     */
     private void refreshEspVisuals() {
         long currentTime = System.currentTimeMillis();
         if (currentTime - lastEspUpdate < ESP_UPDATE_INTERVAL_MS) return;
         
         espBoxes.clear();
         
-        // Add spawner ESP boxes
+        // Add spawner ESP boxes (Channel 1)
         for (SpawnerRecord spawner : spawnerRecords.values()) {
             if (spawner.isValid() && spawner.isBelowY() && spawner.entityType != null) {
                 Box spawnerBox = createBlockBox(spawner.pos);
@@ -643,7 +726,7 @@ public class EntityDebug extends Module {
             }
         }
         
-        // Add chest ESP boxes
+        // Add chest ESP boxes (Channel 1)
         for (ChestRecord chest : chestRecords.values()) {
             if (chest.isValid() && chest.isBelowY() && chest.hasItems()) {
                 Box chestBox = createBlockBox(chest.pos);
@@ -651,7 +734,7 @@ public class EntityDebug extends Module {
             }
         }
         
-        // Add furnace ESP boxes (only burning)
+        // Add furnace ESP boxes (Channel 1)
         for (FurnaceRecord furnace : furnaceRecords.values()) {
             if (furnace.isValid() && furnace.isBelowY() && furnace.isActive()) {
                 Box furnaceBox = createBlockBox(furnace.pos);
@@ -659,7 +742,7 @@ public class EntityDebug extends Module {
             }
         }
         
-        // Add beacon ESP boxes
+        // Add beacon ESP boxes (Channel 1)
         for (BeaconRecord beacon : beaconRecords.values()) {
             if (beacon.isValid() && beacon.isBelowY() && beacon.isActive()) {
                 Box beaconBox = createBlockBox(beacon.pos);
@@ -667,15 +750,15 @@ public class EntityDebug extends Module {
             }
         }
         
-        // Add redstone ESP boxes (active only)
+        // Add redstone ESP boxes (Channel 3) - All light blue
         for (RedstoneRecord redstone : redstoneRecords.values()) {
             if (redstone.isValid() && redstone.isBelowY() && redstone.isPowered()) {
                 Box redstoneBox = createBlockBox(redstone.pos);
-                espBoxes.add(new EspBox(redstoneBox, ESP_FILL, REDSTONE_COLOR));
+                espBoxes.add(new EspBox(redstoneBox, REDSTONE_ESP_FILL, REDSTONE_ESP_COLOR));
             }
         }
         
-        // Add comparator ESP boxes
+        // Add comparator ESP boxes (Channel 7)
         for (ComparatorRecord comparator : comparatorRecords.values()) {
             if (comparator.isValid() && comparator.isBelowY() && comparator.hasOutput()) {
                 Box comparatorBox = createBlockBox(comparator.pos);
@@ -687,6 +770,9 @@ public class EntityDebug extends Module {
         lastEspUpdate = currentTime;
     }
     
+    /**
+     * Creates a bounding box for a block position
+     */
     private Box createBlockBox(BlockPos position) {
         return new Box(
             position.getX(), position.getY(), position.getZ(),
@@ -695,9 +781,13 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // TRACER VISUALIZATION UPDATE
+    // SECTION 21: TRACER VISUALIZATION UPDATE (Lines 952-1020)
     // ============================================================
     
+    /**
+     * Refreshes tracer visualization lines
+     * Tracers draw from crosshair to detected locations at TRACER_HEIGHT
+     */
     private void refreshTracers() {
         long currentTime = System.currentTimeMillis();
         if (currentTime - lastTracerUpdate < TRACER_UPDATE_INTERVAL_MS) return;
@@ -740,14 +830,20 @@ public class EntityDebug extends Module {
         lastTracerUpdate = currentTime;
     }
     
+    /**
+     * Creates a tracer target position at TRACER_HEIGHT above the block
+     */
     private Vec3d createTracerTarget(BlockPos position) {
         return new Vec3d(position.getX() + 0.5, TRACER_HEIGHT, position.getZ() + 0.5);
     }
     
     // ============================================================
-    // EXISTING CHUNK SCANNER (Initial detection)
+    // SECTION 22: EXISTING CHUNK SCANNER (Lines 1022-1080)
     // ============================================================
     
+    /**
+     * Scans existing loaded chunks for immediate detection on module activation
+     */
     private void scanExistingWorldChunks() {
         if (mc.world == null || mc.player == null) return;
         
@@ -798,9 +894,12 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // DATA CLEANUP
+    // SECTION 23: DATA CLEANUP (Lines 1082-1125)
     // ============================================================
     
+    /**
+     * Removes stale data that has timed out
+     */
     private void purgeStaleData() {
         long currentTime = System.currentTimeMillis();
         
@@ -830,7 +929,7 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // TICK HANDLER - 20 TPS Sync
+    // SECTION 24: TICK HANDLER - 20 TPS Sync (Lines 1127-1165)
     // ============================================================
     
     @EventHandler
@@ -871,16 +970,18 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // RENDER HANDLER - ESP Boxes and Tracers
+    // SECTION 25: RENDER HANDLER - ESP Boxes and Tracers (Lines 1167-1220)
     // ============================================================
     
     @EventHandler
     private void onRenderVisuals(Render3DEvent renderEvent) {
         if (!moduleActive || mc.player == null) return;
         
-        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
+        // FIXED: Use player position instead of camera.getPos() (compatibility)
         double playerX = mc.player.getX();
+        double playerY = mc.player.getY();
         double playerZ = mc.player.getZ();
+        Vec3d cameraPos = new Vec3d(playerX, playerY, playerZ);
         Vec3d crosshairOrigin = mc.player.getCameraPosVec(renderEvent.tickDelta);
         
         // Render ESP boxes
@@ -915,7 +1016,7 @@ public class EntityDebug extends Module {
     }
     
     // ============================================================
-    // MODULE LIFECYCLE
+    // SECTION 26: MODULE LIFECYCLE - ACTIVATION (Lines 1222-1270)
     // ============================================================
     
     @Override
@@ -963,6 +1064,10 @@ public class EntityDebug extends Module {
         mc.player.sendMessage(Text.literal("§8[§bED§8] §7Entity Debug §aACTIVE §7(Silent mode)"), false);
     }
     
+    // ============================================================
+    // SECTION 27: MODULE LIFECYCLE - DEACTIVATION (Lines 1272-1300)
+    // ============================================================
+    
     @Override
     public void onDeactivate() {
         moduleActive = false;
@@ -995,6 +1100,10 @@ public class EntityDebug extends Module {
         
         ChatUtils.info("EntityDebug", "§cEntity Debug §7deactivated");
     }
+    
+    // ============================================================
+    // SECTION 28: INFO STRING (Lines 1302-1320)
+    // ============================================================
     
     @Override
     public String getInfoString() {
