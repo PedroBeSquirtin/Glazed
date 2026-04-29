@@ -14,7 +14,6 @@ import net.minecraft.block.entity.*;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.TeleportConfirmC2SPacket;
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
-import net.minecraft.network.packet.c2s.play.KeepAliveC2SPacket;
 import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
@@ -71,7 +70,6 @@ public class EntityDebug extends Module {
         final BlockPos pos;
         Block block;
         BlockState state;
-        int lightLevel;
         long lastSeen;
         String leakMethod;
         boolean isRedstonePowered;
@@ -92,20 +90,6 @@ public class EntityDebug extends Module {
         Box getBoundingBox() {
             return new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
         }
-        
-        Color getColor() {
-            if (isRedstonePowered && redstonePower > 0) {
-                return new Color(255, 100, 100, 200);
-            }
-            if (block == Blocks.SPAWNER) return new Color(200, 0, 0, 200);
-            if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) return new Color(255, 200, 0, 180);
-            if (block == Blocks.BEACON) return new Color(0, 200, 255, 200);
-            if (block == Blocks.REDSTONE_WIRE) return new Color(255, 50, 50, 180);
-            if (block == Blocks.REPEATER || block == Blocks.COMPARATOR) return new Color(255, 100, 50, 180);
-            if (block == Blocks.PISTON || block == Blocks.STICKY_PISTON) return new Color(150, 150, 255, 180);
-            if (block == Blocks.OBSERVER) return new Color(100, 100, 200, 180);
-            return new Color(100, 150, 255, 160);
-        }
     }
     
     private static class LeakedBlockEntityData {
@@ -125,15 +109,6 @@ public class EntityDebug extends Module {
         
         Box getBoundingBox() {
             return new Box(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
-        }
-        
-        Color getColor() {
-            if (entityType.contains("Spawner")) return new Color(200, 0, 0, 200);
-            if (entityType.contains("Chest")) return new Color(255, 200, 0, 180);
-            if (entityType.contains("Furnace")) return new Color(150, 150, 150, 180);
-            if (entityType.contains("Hopper")) return new Color(100, 100, 100, 180);
-            if (entityType.contains("Sign")) return new Color(200, 200, 100, 160);
-            return new Color(100, 150, 255, 160);
         }
     }
     
@@ -277,25 +252,27 @@ public class EntityDebug extends Module {
                 if (Map.class.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
                     Map<?, ?> updates = (Map<?, ?>) f.get(packet);
-                    for (Map.Entry<?, ?> entry : updates.entrySet()) {
-                        try {
-                            long posLong = (long) entry.getKey();
-                            BlockState state = (BlockState) entry.getValue();
-                            int x = (int)(posLong >> 38);
-                            int y = (int)(posLong << 52 >> 52);
-                            int z = (int)(posLong << 26 >> 38);
-                            BlockPos pos = new BlockPos(x, y, z);
-                            
-                            if (y <= MAX_RENDER_Y) {
-                                LeakedBlockData leaked = leakedBlocks.get(pos);
-                                if (leaked == null) {
-                                    leaked = new LeakedBlockData(pos, state.getBlock(), "chunk_delta");
-                                    leakedBlocks.put(pos, leaked);
+                    if (updates != null) {
+                        for (Map.Entry<?, ?> entry : updates.entrySet()) {
+                            try {
+                                long posLong = (long) entry.getKey();
+                                BlockState state = (BlockState) entry.getValue();
+                                int x = (int)(posLong >> 38);
+                                int y = (int)(posLong << 52 >> 52);
+                                int z = (int)(posLong << 26 >> 38);
+                                BlockPos pos = new BlockPos(x, y, z);
+                                
+                                if (y <= MAX_RENDER_Y) {
+                                    LeakedBlockData leaked = leakedBlocks.get(pos);
+                                    if (leaked == null) {
+                                        leaked = new LeakedBlockData(pos, state.getBlock(), "chunk_delta");
+                                        leakedBlocks.put(pos, leaked);
+                                    }
+                                    leaked.state = state;
+                                    leaked.lastSeen = System.currentTimeMillis();
                                 }
-                                leaked.state = state;
-                                leaked.lastSeen = System.currentTimeMillis();
-                            }
-                        } catch (Exception ignored) {}
+                            } catch (Exception ignored) {}
+                        }
                     }
                 }
             }
@@ -329,28 +306,22 @@ public class EntityDebug extends Module {
     private void analyzeChunkDataPacket(ChunkDataS2CPacket packet) {
         try {
             ChunkPos chunkPos = packet.getChunkPos();
-            int chunkX = chunkPos.x;
-            int chunkZ = chunkPos.z;
-            
             ChunkLeakData chunkData = leakedChunkData.get(chunkPos);
             if (chunkData == null) {
                 chunkData = new ChunkLeakData(chunkPos);
                 leakedChunkData.put(chunkPos, chunkData);
             }
             chunkData.lastSeen = System.currentTimeMillis();
-            
         } catch (Exception ignored) {}
     }
     
     // ============================================================
     // BYPASS TECHNIQUE 3: ACTIVE REDSTONE DETECTION
-    // Detects redstone activity even when hidden
     // ============================================================
     
     private void detectRedstoneActivity() {
         if (mc.world == null) return;
         
-        // Scan for redstone components in loaded chunks below Y=20
         int radius = SCAN_RADIUS;
         BlockPos p = mc.player.getBlockPos();
         
@@ -363,7 +334,6 @@ public class EntityDebug extends Module {
                     BlockState state = mc.world.getBlockState(pos);
                     Block block = state.getBlock();
                     
-                    // Check for powered redstone components
                     int power = 0;
                     if (block instanceof RedstoneWireBlock) {
                         power = state.get(RedstoneWireBlock.POWER);
@@ -388,7 +358,6 @@ public class EntityDebug extends Module {
                         leaked.isRedstonePowered = true;
                         leaked.redstonePower = power;
                         leaked.lastSeen = System.currentTimeMillis();
-                        
                         redstoneActivity.put(pos, new RedstoneActivity(pos, power));
                     }
                 }
@@ -403,25 +372,10 @@ public class EntityDebug extends Module {
     private void clientStatusBypass() {
         if (mc.player == null || mc.getNetworkHandler() == null) return;
         
-        if (bypassTick % 80 == 0) { // Every 4 seconds
+        if (bypassTick % 80 == 0) {
             try {
                 ClientCommandC2SPacket commandPacket = new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY);
                 mc.getNetworkHandler().sendPacket(commandPacket);
-            } catch (Exception ignored) {}
-        }
-    }
-    
-    // ============================================================
-    // BYPASS TECHNIQUE 5: KEEP ALIVE TRIGGER
-    // ============================================================
-    
-    private void keepAliveBypass() {
-        if (mc.player == null || mc.getNetworkHandler() == null) return;
-        
-        if (bypassTick % 50 == 0) { // Every 2.5 seconds
-            try {
-                KeepAliveC2SPacket keepAlive = new KeepAliveC2SPacket((int)(System.currentTimeMillis() / 1000));
-                mc.getNetworkHandler().sendPacket(keepAlive);
             } catch (Exception ignored) {}
         }
     }
@@ -490,30 +444,9 @@ public class EntityDebug extends Module {
                block == Blocks.NOTE_BLOCK ||
                block == Blocks.JUKEBOX ||
                block == Blocks.SHULKER_BOX ||
-               block == Blocks.BLACK_SHULKER_BOX ||
-               block == Blocks.BLUE_SHULKER_BOX ||
-               block == Blocks.BROWN_SHULKER_BOX ||
-               block == Blocks.CYAN_SHULKER_BOX ||
-               block == Blocks.GRAY_SHULKER_BOX ||
-               block == Blocks.GREEN_SHULKER_BOX ||
-               block == Blocks.LIGHT_BLUE_SHULKER_BOX ||
-               block == Blocks.LIGHT_GRAY_SHULKER_BOX ||
-               block == Blocks.LIME_SHULKER_BOX ||
-               block == Blocks.MAGENTA_SHULKER_BOX ||
-               block == Blocks.ORANGE_SHULKER_BOX ||
-               block == Blocks.PINK_SHULKER_BOX ||
-               block == Blocks.PURPLE_SHULKER_BOX ||
-               block == Blocks.RED_SHULKER_BOX ||
-               block == Blocks.WHITE_SHULKER_BOX ||
-               block == Blocks.YELLOW_SHULKER_BOX ||
                block == Blocks.ANVIL ||
                block == Blocks.ENCHANTING_TABLE ||
-               block == Blocks.GRINDSTONE ||
-               block == Blocks.LOOM ||
-               block == Blocks.CARTOGRAPHY_TABLE ||
-               block == Blocks.STONECUTTER ||
-               block == Blocks.SMITHING_TABLE ||
-               block == Blocks.FLETCHING_TABLE;
+               block == Blocks.GRINDSTONE;
     }
     
     // ============================================================
@@ -524,10 +457,9 @@ public class EntityDebug extends Module {
     private void onTick(TickEvent.Post event) {
         if (!isActive || mc.world == null || mc.player == null) return;
         
-        // Run all bypass techniques
+        // Run bypass techniques
         forceChunkDataResend();
         clientStatusBypass();
-        keepAliveBypass();
         
         // Active scanning
         activeBlockScan();
