@@ -30,6 +30,17 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * DonutBypass - Advanced Underground Structure Detector
+ * 
+ * Designed for DonutSMP to detect budding amethyst chunks, geodes, and suspicious underground patterns.
+ * Features:
+ * - Multi-threaded chunk scanning for performance
+ * - Configurable detection thresholds
+ * - Color-coded rendering with tracers
+ * - Notification system with chat and sound alerts
+ * - Distance filtering to reduce clutter
+ */
 public class DonutBypass extends Module {
     
     private final SettingGroup sgGeneral = settings.createGroup("General");
@@ -90,7 +101,7 @@ public class DonutBypass extends Module {
     
     private final Setting<Boolean> detectSuspiciousBlocks = sgDetection.add(new BoolSetting.Builder()
         .name("detect-suspicious-blocks")
-        .description("Detect other suspicious underground blocks")
+        .description("Detect other suspicious underground blocks (ores, spawners, chests)")
         .defaultValue(false)
         .build()
     );
@@ -119,13 +130,6 @@ public class DonutBypass extends Module {
         .name("tracers")
         .description("Draw tracers to found chunks")
         .defaultValue(true)
-        .build()
-    );
-    
-    private final Setting<Boolean> showCoordinates = sgRender.add(new BoolSetting.Builder()
-        .name("show-coordinates")
-        .description("Show chunk coordinates in ESP")
-        .defaultValue(false)
         .build()
     );
     
@@ -211,7 +215,6 @@ public class DonutBypass extends Module {
     
     private boolean isActive = false;
     private int tickCounter = 0;
-    private long lastCleanup = 0;
     
     // ============================================================
     // CONSTRUCTOR
@@ -397,12 +400,12 @@ public class DonutBypass extends Module {
     }
     
     private boolean isSuspiciousBlock(Block block) {
+        // Removed NETHERITE_SCRAP (doesn't exist in 1.21.11)
         return block == Blocks.DIAMOND_ORE ||
                block == Blocks.DEEPSLATE_DIAMOND_ORE ||
                block == Blocks.EMERALD_ORE ||
                block == Blocks.DEEPSLATE_EMERALD_ORE ||
                block == Blocks.ANCIENT_DEBRIS ||
-               block == Blocks.NETHERITE_SCRAP ||
                block == Blocks.SPAWNER ||
                block == Blocks.CHEST ||
                block == Blocks.TRAPPED_CHEST;
@@ -448,8 +451,9 @@ public class DonutBypass extends Module {
             ChatUtils.info("DonutBypass", "§aFound " + foundType + " §7at chunk [§e" + chunkX + ", " + chunkZ + "§7] §8(" + blockCount + " blocks)");
         }
         
+        // FIXED: Use SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP directly (no .value() needed in 1.21.11)
         if (soundNotify.get() && mc.player != null) {
-            mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP.value(), 1.0f, 1.0f);
+            mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
         }
     }
     
@@ -518,7 +522,7 @@ public class DonutBypass extends Module {
         
         // Render amethyst cluster chunks (secondary)
         for (long packedPos : foundClusterChunks) {
-            if (foundBuddingChunks.contains(packedPos)) continue; // Skip if already rendered
+            if (foundBuddingChunks.contains(packedPos)) continue;
             if (!isWithinRenderDistance(packedPos)) continue;
             
             Color secondaryColor = new Color(
@@ -558,13 +562,8 @@ public class DonutBypass extends Module {
         // Render as box with fill and outline
         event.renderer.box(x1, yLevel, z1, x2, y2, z2, fill, outline, ShapeMode.Both, 0);
         
-        // Show coordinates if enabled
-        if (showCoordinates.get()) {
-            double centerX = x1 + 8.0;
-            double centerZ = z1 + 8.0;
-            String coordText = chunkX + ", " + chunkZ;
-            event.renderer.text(coordText, centerX, yLevel + thickness + 0.2, centerZ, true, outline);
-        }
+        // Coordinates display removed - event.renderer.text not available in this version
+        // Using tracer line as primary navigation method
     }
     
     private void renderTracer(Render3DEvent event, long packedPos, Vec3d startPos, Color color) {
