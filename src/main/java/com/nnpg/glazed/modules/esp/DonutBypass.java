@@ -30,17 +30,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * DonutBypass - Advanced Underground Structure Detector
- * 
- * Originally designed for DonutSMP to detect budding amethyst chunks.
- * Improved with better accuracy, fixed tracers, and enhanced rendering.
- * 
- * Detects:
- * - Budding Amethyst (primary target)
- * - Geodes (amethyst clusters)
- * - Suspicious underground patterns
- */
 public class DonutBypass extends Module {
     
     private final SettingGroup sgGeneral = settings.createGroup("General");
