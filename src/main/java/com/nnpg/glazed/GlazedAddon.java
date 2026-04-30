@@ -41,6 +41,7 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new KelpESP());
         Modules.get().add(new DripstoneESP());
         Modules.get().add(new EntityDebug());
+        Modules.get().add(new DonutBypass());
         Modules.get().add(new RotatedDeepslateESP());
         Modules.get().add(new CrateBuyer());
         Modules.get().add(new WanderingESP());
