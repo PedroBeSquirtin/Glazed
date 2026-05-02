@@ -40,6 +40,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * BaseLeakDebug - Advanced Player Activity Detector
@@ -51,7 +52,6 @@ import java.util.concurrent.Executors;
  * - Entity concentrations (mob farms, villagers)
  * - Block concentrations (chests, furnaces, hoppers)
  * - Player-placed blocks (crafting tables, anvils, etc.)
- * - Sound detection (chest opens, piston moves, etc.)
  */
 public class BaseLeakDebug extends Module {
     
@@ -160,7 +160,7 @@ public class BaseLeakDebug extends Module {
     
     private final Setting<Boolean> detectStorage = sgDetection.add(new BoolSetting.Builder()
         .name("detect-storage")
-        .description("Detect chest/shipper concentrations")
+        .description("Detect chest/hopper concentrations")
         .defaultValue(true)
         .build()
     );
@@ -499,8 +499,10 @@ public class BaseLeakDebug extends Module {
                 if (power > 0) {
                     AtomicInteger count = redstoneChangeCount.computeIfAbsent(pos, k -> new AtomicInteger(0));
                     Long last = redstoneLastChange.get(pos);
-                    
-                    if (last != null && now - last < 1000) {
+                    if (last == null) {
+                        redstoneLastChange.put(pos, now);
+                        count.set(0);
+                    } else if (now - last < 1000) {
                         count.incrementAndGet();
                         if (count.get() >= redstoneClockThreshold.get()) {
                             ChunkPos chunkPos = new ChunkPos(pos);
@@ -509,10 +511,11 @@ public class BaseLeakDebug extends Module {
                                 addDetection(chunkPos.toLong(), CONFIDENCE_REDSTONE_CLOCK, "§cREDSTONE CLOCK");
                             }
                         }
+                        redstoneLastChange.put(pos, now);
                     } else {
                         count.set(0);
+                        redstoneLastChange.put(pos, now);
                     }
-                    redstoneLastChange.put(pos, now);
                 }
             }
         } catch (Exception ignored) {}
@@ -564,8 +567,6 @@ public class BaseLeakDebug extends Module {
         int hopperCount = 0;
         int furnaceCount = 0;
         int playerBlocks = 0;
-        int villagers = 0;
-        int mobs = 0;
         
         int startX = pos.getStartX();
         int startZ = pos.getStartZ();
@@ -578,11 +579,12 @@ public class BaseLeakDebug extends Module {
             for (int z = startZ; z < startZ + 16; z++) {
                 int surfaceY = chunk.getHeightmap(Heightmap.Type.WORLD_SURFACE).get(x - startX, z - startZ);
                 
-                for (int y = bottomY; y < Math.min(topY, surfaceY); y++) {
+                // Scan below surface (underground)
+                for (int y = bottomY; y < Math.min(topY, surfaceY - 3); y++) {
                     mutablePos.set(x, y, z);
                     Block block = chunk.getBlockState(mutablePos).getBlock();
                     
-                    // GROWTH DETECTION - Max growth crops
+                    // GROWTH DETECTION - Max growth crops (underground farms)
                     if (detectMaxGrowth.get() && isMaxGrowthCrop(chunk, mutablePos, block)) {
                         if (!maxGrowthCrops.contains(mutablePos.toImmutable())) {
                             maxGrowthCrops.add(mutablePos.toImmutable());
@@ -617,11 +619,6 @@ public class BaseLeakDebug extends Module {
                     
                     // PLAYER BLOCKS DETECTION
                     if (isPlayerPlacedBlock(block)) playerBlocks++;
-                    
-                    // ENTITY SCANNING (from world)
-                    if (detectVillagers.get() || detectMobFarms.get()) {
-                        // Entity counting done in tick handler
-                    }
                 }
             }
         }
@@ -933,8 +930,8 @@ public class BaseLeakDebug extends Module {
         });
         
         // Clear old redstone tracking
-        redstoneChangeCount.entrySet().removeIf(e -> now - redstoneLastChange.getOrDefault(e.getKey(), 0L) > 5000);
-        redstoneLastChange.entrySet().removeIf(e -> now - e.getValue() > 5000);
+        redstoneChangeCount.clear();
+        redstoneLastChange.clear();
         
         if (tickCounter % 600 == 0) notifiedChunks.clear();
     }
