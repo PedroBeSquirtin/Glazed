@@ -39,29 +39,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * BaseLeakDebug - Advanced Underground Base Detector for DonutSMP
+ * BaseLeakDebug - High Confidence Underground Base Detector
  * 
- * Combines:
- * - Packet-based entity detection (spawners, chests, beacons, furnaces)
- * - Chunk-based block scanning (amethyst geodes, suspicious blocks)
- * - Confidence scoring system with percentage-based detection
- * - Chat notifications with coordinates and confidence levels
- * - ESP rendering with color-coded confidence
- * 
- * Detection Types:
- * - SPAWNER: 100% confidence (definite base)
- * - CHEST with items: 85% confidence (storage)
- * - BEACON: 80% confidence (player structure)
- * - BUDDING AMETHYST: 70% confidence (geode = player activity)
- * - FURNACE burning: 60% confidence (active use)
- * - ENTITY cluster: 50% confidence (mob farm indicator)
- * - SUSPICIOUS BLOCKS: 40% confidence (ores/chests)
- * 
- * @author Glazed Development
- * @version 4.0.0
+ * Optimized thresholds to reduce false positives:
+ * - Only detects actual player-built structures
+ * - High confidence requirements
+ * - Ignores natural generation
  */
 public class BaseLeakDebug extends Module {
     
@@ -76,9 +61,9 @@ public class BaseLeakDebug extends Module {
     
     private final Setting<Integer> minDistance = sgGeneral.add(new IntSetting.Builder()
         .name("min-distance")
-        .description("Minimum horizontal distance to detect (avoids your own base)")
-        .defaultValue(50)
-        .min(0)
+        .description("Minimum distance from player to detect (avoids your own base)")
+        .defaultValue(100)
+        .min(50)
         .max(500)
         .build()
     );
@@ -93,7 +78,7 @@ public class BaseLeakDebug extends Module {
     );
     
     // ============================================================
-    // DETECTION SETTINGS
+    // DETECTION SETTINGS - HIGH THRESHOLDS
     // ============================================================
     
     private final Setting<Boolean> detectSpawners = sgDetection.add(new BoolSetting.Builder()
@@ -117,13 +102,6 @@ public class BaseLeakDebug extends Module {
         .build()
     );
     
-    private final Setting<Boolean> detectBuddingAmethyst = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-budding-amethyst")
-        .description("Detect budding amethyst geodes (70% confidence)")
-        .defaultValue(true)
-        .build()
-    );
-    
     private final Setting<Boolean> detectFurnaces = sgDetection.add(new BoolSetting.Builder()
         .name("detect-furnaces")
         .description("Detect burning furnaces (60% confidence)")
@@ -131,123 +109,99 @@ public class BaseLeakDebug extends Module {
         .build()
     );
     
-    private final Setting<Boolean> detectEntityClusters = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-entity-clusters")
-        .description("Detect clusters of entities (50% confidence)")
+    private final Setting<Boolean> detectStorageConcentration = sgDetection.add(new BoolSetting.Builder()
+        .name("detect-storage-concentration")
+        .description("Detect multiple chests/hoppers in one chunk (70% confidence)")
         .defaultValue(true)
         .build()
     );
     
-    private final Setting<Boolean> detectSuspiciousBlocks = sgDetection.add(new BoolSetting.Builder()
-        .name("detect-suspicious-blocks")
-        .description("Detect suspicious blocks like ores (40% confidence)")
-        .defaultValue(false)
+    private final Setting<Boolean> detectPlayerBlocks = sgDetection.add(new BoolSetting.Builder()
+        .name("detect-player-blocks")
+        .description("Detect player-placed blocks (furnaces, crafting tables, etc.)")
+        .defaultValue(true)
         .build()
     );
     
-    private final Setting<Integer> entityClusterThreshold = sgDetection.add(new IntSetting.Builder()
-        .name("entity-cluster-threshold")
-        .description("Entities in a chunk to trigger detection")
+    // ============================================================
+    // DETECTION THRESHOLDS - INCREASED
+    // ============================================================
+    
+    private final Setting<Integer> chestThreshold = sgDetection.add(new IntSetting.Builder()
+        .name("chest-threshold")
+        .description("Minimum number of chests in a chunk to trigger detection")
+        .defaultValue(3)
+        .min(1)
+        .max(10)
+        .build()
+    );
+    
+    private final Setting<Integer> hopperThreshold = sgDetection.add(new IntSetting.Builder()
+        .name("hopper-threshold")
+        .description("Minimum number of hoppers in a chunk to trigger detection")
         .defaultValue(5)
-        .min(2)
+        .min(1)
         .max(20)
         .build()
     );
     
-    // ============================================================
-    // RENDER SETTINGS
-    // ============================================================
-    
-    private final Setting<Boolean> chunkHighlight = sgRender.add(new BoolSetting.Builder()
-        .name("chunk-highlight")
-        .description("Highlight chunks with detected activity")
-        .defaultValue(true)
+    private final Setting<Integer> furnaceThreshold = sgDetection.add(new IntSetting.Builder()
+        .name("furnace-threshold")
+        .description("Minimum number of furnaces in a chunk to trigger detection")
+        .defaultValue(4)
+        .min(1)
+        .max(20)
         .build()
     );
     
-    private final Setting<Boolean> tracers = sgRender.add(new BoolSetting.Builder()
-        .name("tracers")
-        .description("Draw tracers to detected chunks")
-        .defaultValue(true)
-        .build()
-    );
-    
-    private final Setting<Double> highlightHeight = sgRender.add(new DoubleSetting.Builder()
-        .name("highlight-height")
-        .description("Y-level for chunk highlight boxes")
-        .defaultValue(60.0)
-        .min(0)
-        .max(128)
+    private final Setting<Integer> playerBlockThreshold = sgDetection.add(new IntSetting.Builder()
+        .name("player-block-threshold")
+        .description("Minimum number of player-placed blocks in a chunk")
+        .defaultValue(10)
+        .min(5)
+        .max(50)
         .build()
     );
     
     // ============================================================
-    // NOTIFICATION SETTINGS
-    // ============================================================
-    
-    private final Setting<Boolean> chatNotify = sgNotifications.add(new BoolSetting.Builder()
-        .name("chat-notify")
-        .description("Send chat notification when detection is found")
-        .defaultValue(true)
-        .build()
-    );
-    
-    private final Setting<Boolean> soundNotify = sgNotifications.add(new BoolSetting.Builder()
-        .name("sound-notify")
-        .description("Play sound when detection is found")
-        .defaultValue(true)
-        .build()
-    );
-    
-    private final Setting<Boolean> notifyCooldown = sgNotifications.add(new BoolSetting.Builder()
-        .name("notify-cooldown")
-        .description("Only notify once per chunk")
-        .defaultValue(true)
-        .build()
-    );
-    
-    // ============================================================
-    // CONFIDENCE SCORES
+    // CONFIDENCE SCORES - ADJUSTED
     // ============================================================
     
     private static final int CONFIDENCE_SPAWNER = 100;
-    private static final int CONFIDENCE_CHEST = 85;
-    private static final int CONFIDENCE_BEACON = 80;
-    private static final int CONFIDENCE_BUDDING_AMETHYST = 70;
-    private static final int CONFIDENCE_FURNACE = 60;
-    private static final int CONFIDENCE_ENTITY_CLUSTER = 50;
-    private static final int CONFIDENCE_SUSPICIOUS = 40;
+    private static final int CONFIDENCE_BEACON = 90;
+    private static final int CONFIDENCE_STORAGE_CONCENTRATION = 75;
+    private static final int CONFIDENCE_CHEST_CLUSTER = 70;
+    private static final int CONFIDENCE_FURNACE_CLUSTER = 60;
+    private static final int CONFIDENCE_PLAYER_BLOCKS = 55;
     
     // ============================================================
-    // COLORS - Based on confidence level
+    // COLORS
     // ============================================================
     
-    private static final Color COLOR_100 = new Color(255, 50, 50, 120);   // Red - Definite base
-    private static final Color COLOR_85 = new Color(255, 150, 50, 120);  // Orange - High confidence
-    private static final Color COLOR_70 = new Color(255, 220, 50, 120);  // Yellow - Medium-high
-    private static final Color COLOR_50 = new Color(150, 255, 100, 120); // Light green - Medium
-    private static final Color COLOR_40 = new Color(100, 200, 255, 100); // Light blue - Low
+    private static final Color COLOR_100 = new Color(255, 50, 50, 150);   // Red - Spawner
+    private static final Color COLOR_90 = new Color(255, 100, 50, 140);   // Orange - Beacon
+    private static final Color COLOR_75 = new Color(255, 180, 50, 130);   // Yellow-Orange
+    private static final Color COLOR_60 = new Color(200, 220, 50, 120);   // Yellow
+    private static final Color COLOR_50 = new Color(100, 255, 100, 110);  // Light Green
     
-    private static final Color TRACER_BASE = new Color(100, 200, 255, 200);
+    private static final Color TRACER_BASE = new Color(255, 100, 50, 200);
     
     // ============================================================
     // DATA STORAGE
     // ============================================================
     
-    // Chunk detection data
     private final Map<Long, ChunkDetectionData> detectedChunks = new ConcurrentHashMap<>();
     private final Set<Long> scannedChunks = ConcurrentHashMap.newKeySet();
     private final Set<Long> notifiedChunks = ConcurrentHashMap.newKeySet();
     private final ConcurrentLinkedQueue<Long> notifyQueue = new ConcurrentLinkedQueue<>();
     
-    // Entity tracking (from packets)
-    private final Map<BlockPos, SpawnerRecord> spawnerRecords = new ConcurrentHashMap<>();
-    private final Map<BlockPos, ChestRecord> chestRecords = new ConcurrentHashMap<>();
-    private final Map<BlockPos, FurnaceRecord> furnaceRecords = new ConcurrentHashMap<>();
-    private final Map<BlockPos, BeaconRecord> beaconRecords = new ConcurrentHashMap<>();
-    
-    // Entity clusters
-    private final Map<ChunkPos, Integer> entityCounts = new ConcurrentHashMap<>();
+    // Player-placed blocks tracking
+    private final Map<ChunkPos, Integer> playerBlockCounts = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> chestCounts = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> hopperCounts = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> furnaceCounts = new ConcurrentHashMap<>();
+    private final Set<ChunkPos> beaconChunks = ConcurrentHashMap.newKeySet();
+    private final Set<ChunkPos> spawnerChunks = ConcurrentHashMap.newKeySet();
     
     // Render storage
     private final CopyOnWriteArrayList<RenderBox> renderBoxes = new CopyOnWriteArrayList<>();
@@ -258,7 +212,6 @@ public class BaseLeakDebug extends Module {
     private int tickCounter = 0;
     private long lastTracerUpdate = 0;
     private long lastRenderUpdate = 0;
-    private final Map<String, Long> globalNotifCooldown = new ConcurrentHashMap<>();
     
     // ============================================================
     // DATA CLASSES
@@ -277,70 +230,22 @@ public class BaseLeakDebug extends Module {
             this.lastSeen = System.currentTimeMillis();
         }
         
-        void update(int newConfidence, String newReason) {
-            if (newConfidence > confidence) {
-                confidence = newConfidence;
-                reason = newReason;
-            }
-            lastSeen = System.currentTimeMillis();
-        }
-        
-        boolean isValid() { return System.currentTimeMillis() - lastSeen < 120000; }
-        boolean isBelowY() { return true; }
+        boolean isValid() { return System.currentTimeMillis() - lastSeen < 180000; } // 3 minutes
         
         Color getColor() {
-            if (confidence >= 100) return COLOR_100;
-            if (confidence >= 80) return COLOR_85;
-            if (confidence >= 60) return COLOR_70;
-            if (confidence >= 50) return COLOR_50;
-            return COLOR_40;
+            if (confidence >= 90) return COLOR_100;
+            if (confidence >= 75) return COLOR_90;
+            if (confidence >= 60) return COLOR_75;
+            if (confidence >= 50) return COLOR_60;
+            return COLOR_50;
         }
         
         String getConfidenceString() {
-            if (confidence >= 100) return "§c100%§f";
-            if (confidence >= 85) return "§6" + confidence + "%§f";
-            if (confidence >= 70) return "§e" + confidence + "%§f";
-            if (confidence >= 50) return "§a" + confidence + "%§f";
-            return "§b" + confidence + "%§f";
+            if (confidence >= 90) return "§c" + confidence + "%§f";
+            if (confidence >= 75) return "§6" + confidence + "%§f";
+            if (confidence >= 60) return "§e" + confidence + "%§f";
+            return "§a" + confidence + "%§f";
         }
-    }
-    
-    private static class SpawnerRecord {
-        final BlockPos pos;
-        String entityType;
-        long lastSeen;
-        SpawnerRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
-        boolean isValid() { return System.currentTimeMillis() - lastSeen < 90000; }
-        boolean isBelowY() { return pos.getY() <= 20; }
-        void update() { lastSeen = System.currentTimeMillis(); }
-    }
-    
-    private static class ChestRecord {
-        final BlockPos pos;
-        int itemCount;
-        long lastSeen;
-        ChestRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
-        boolean isValid() { return System.currentTimeMillis() - lastSeen < 90000; }
-        boolean isBelowY() { return pos.getY() <= 20; }
-        boolean hasItems() { return itemCount > 0; }
-    }
-    
-    private static class FurnaceRecord {
-        final BlockPos pos;
-        boolean isBurning;
-        long lastSeen;
-        FurnaceRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
-        boolean isValid() { return System.currentTimeMillis() - lastSeen < 90000; }
-        boolean isBelowY() { return pos.getY() <= 20; }
-    }
-    
-    private static class BeaconRecord {
-        final BlockPos pos;
-        int levels;
-        long lastSeen;
-        BeaconRecord(BlockPos p) { pos = p; lastSeen = System.currentTimeMillis(); }
-        boolean isValid() { return System.currentTimeMillis() - lastSeen < 90000; }
-        boolean isBelowY() { return pos.getY() <= 20; }
     }
     
     private static class RenderBox {
@@ -362,7 +267,7 @@ public class BaseLeakDebug extends Module {
     // ============================================================
     
     public BaseLeakDebug() {
-        super(GlazedAddon.esp, "base-leak-debug", "§c§lBASE LEAK §8| §7Underground Base Detector");
+        super(GlazedAddon.esp, "base-leak-debug", "§c§lBASE LEAK §8| §7Base Detector (High Thresholds)");
     }
     
     // ============================================================
@@ -390,11 +295,12 @@ public class BaseLeakDebug extends Module {
         scannedChunks.clear();
         notifiedChunks.clear();
         notifyQueue.clear();
-        spawnerRecords.clear();
-        chestRecords.clear();
-        furnaceRecords.clear();
-        beaconRecords.clear();
-        entityCounts.clear();
+        playerBlockCounts.clear();
+        chestCounts.clear();
+        hopperCounts.clear();
+        furnaceCounts.clear();
+        beaconChunks.clear();
+        spawnerChunks.clear();
         renderBoxes.clear();
         tracerPoints.clear();
         
@@ -406,10 +312,11 @@ public class BaseLeakDebug extends Module {
         }
         
         ChatUtils.info("BaseLeakDebug", "§c§lBASE LEAK DETECTOR §aACTIVATED");
-        ChatUtils.info("BaseLeakDebug", "§7- Monitoring packets for underground activity");
-        ChatUtils.info("BaseLeakDebug", "§7- Scanning chunks for suspicious patterns");
+        ChatUtils.info("BaseLeakDebug", "§7- High threshold mode (reduced false positives)");
+        ChatUtils.info("BaseLeakDebug", "§7- Chests needed: §e" + chestThreshold.get() + "+ per chunk");
+        ChatUtils.info("BaseLeakDebug", "§7- Hoppers needed: §e" + hopperThreshold.get() + "+ per chunk");
         if (mc.player != null) {
-            mc.player.sendMessage(Text.literal("§8[§c§lBLD§8] §7BaseLeakDebug §aACTIVE"), false);
+            mc.player.sendMessage(Text.literal("§8[§c§lBLD§8] §7BaseLeakDebug §aACTIVE §8(High Thresholds)"), false);
         }
     }
     
@@ -424,18 +331,19 @@ public class BaseLeakDebug extends Module {
         scannedChunks.clear();
         notifiedChunks.clear();
         notifyQueue.clear();
-        spawnerRecords.clear();
-        chestRecords.clear();
-        furnaceRecords.clear();
-        beaconRecords.clear();
-        entityCounts.clear();
+        playerBlockCounts.clear();
+        chestCounts.clear();
+        hopperCounts.clear();
+        furnaceCounts.clear();
+        beaconChunks.clear();
+        spawnerChunks.clear();
         renderBoxes.clear();
         tracerPoints.clear();
         ChatUtils.info("BaseLeakDebug", "§cBaseLeakDebug deactivated");
     }
     
     // ============================================================
-    // PACKET CAPTURE - Entity Detection
+    // PACKET CAPTURE - Priority Detections
     // ============================================================
     
     @EventHandler
@@ -444,10 +352,6 @@ public class BaseLeakDebug extends Module {
         
         if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
             processBlockEntity(packet);
-        }
-        
-        if (event.packet instanceof EntitySpawnS2CPacket packet) {
-            processEntitySpawn(packet);
         }
     }
     
@@ -458,8 +362,10 @@ public class BaseLeakDebug extends Module {
             NbtCompound nbt = packet.getNbt();
             
             if (nbt == null) return;
+            ChunkPos chunkPos = new ChunkPos(pos);
+            long packedPos = chunkPos.toLong();
             
-            // Spawner detection - 100% confidence
+            // SPAWNER - 100% confidence (HIGHEST PRIORITY)
             if (detectSpawners.get() && type.contains("Spawner")) {
                 String entityType = "Unknown";
                 try {
@@ -469,62 +375,24 @@ public class BaseLeakDebug extends Module {
                         .orElse("Unknown");
                 } catch (Exception ignored) {}
                 
-                spawnerRecords.put(pos, new SpawnerRecord(pos));
-                addDetection(pos, CONFIDENCE_SPAWNER, "SPAWNER (" + entityType + ")");
+                spawnerChunks.add(chunkPos);
+                addDetection(packedPos, CONFIDENCE_SPAWNER, "§c§lSPAWNER §7(" + entityType + ")");
             }
             
-            // Chest detection - 85% confidence
-            if (detectChests.get() && (type.contains("Chest") || type.contains("Barrel"))) {
-                int itemCount = nbt.getList("Items").map(NbtList::size).orElse(0);
-                if (itemCount > 0) {
-                    ChestRecord record = chestRecords.computeIfAbsent(pos, k -> new ChestRecord(pos));
-                    record.itemCount = itemCount;
-                    addDetection(pos, CONFIDENCE_CHEST, "CHEST (" + itemCount + " items)");
-                }
-            }
-            
-            // Furnace detection - 60% confidence
-            if (detectFurnaces.get() && type.contains("Furnace")) {
-                int burnTime = nbt.getInt("BurnTime").orElse(0);
-                if (burnTime > 0) {
-                    FurnaceRecord record = furnaceRecords.computeIfAbsent(pos, k -> new FurnaceRecord(pos));
-                    record.isBurning = true;
-                    addDetection(pos, CONFIDENCE_FURNACE, "FURNACE (burning)");
-                }
-            }
-            
-            // Beacon detection - 80% confidence
+            // BEACON - 90% confidence
             if (detectBeacons.get() && type.contains("Beacon")) {
                 int levels = nbt.getInt("Levels").orElse(0);
                 if (levels > 0) {
-                    BeaconRecord record = beaconRecords.computeIfAbsent(pos, k -> new BeaconRecord(pos));
-                    record.levels = levels;
-                    addDetection(pos, CONFIDENCE_BEACON, "BEACON (level " + levels + ")");
+                    beaconChunks.add(chunkPos);
+                    addDetection(packedPos, CONFIDENCE_BEACON, "§6BEACON §7(level " + levels + ")");
                 }
             }
             
-        } catch (Exception ignored) {}
-    }
-    
-    private void processEntitySpawn(EntitySpawnS2CPacket packet) {
-        if (!detectEntityClusters.get()) return;
-        
-        try {
-            double y = 0;
-            for (Field f : packet.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                if (f.getType() == double.class && y == 0) y = f.getDouble(packet);
-            }
-            
-            if (y <= 20) {
-                // Track entity clusters
-                // Entity tracking would go here
-            }
         } catch (Exception ignored) {}
     }
     
     // ============================================================
-    // CHUNK SCANNING - Block Detection
+    // CHUNK SCANNING - Block Concentration Detection
     // ============================================================
     
     @EventHandler
@@ -554,9 +422,11 @@ public class BaseLeakDebug extends Module {
         long packedPos = pos.toLong();
         scannedChunks.add(packedPos);
         
-        int buddingCount = 0;
-        int suspiciousCount = 0;
         int chestCount = 0;
+        int hopperCount = 0;
+        int furnaceCount = 0;
+        int craftingCount = 0;
+        int railCount = 0;
         
         int startX = pos.getStartX();
         int startZ = pos.getStartZ();
@@ -569,59 +439,81 @@ public class BaseLeakDebug extends Module {
             for (int z = startZ; z < startZ + 16; z++) {
                 int surfaceY = chunk.getHeightmap(Heightmap.Type.WORLD_SURFACE).get(x - startX, z - startZ);
                 
-                for (int y = bottomY; y < Math.min(topY, surfaceY + 30); y++) {
+                // Only scan below surface (underground)
+                for (int y = bottomY; y < Math.min(topY, surfaceY - 5); y++) {
                     mutablePos.set(x, y, z);
                     Block block = chunk.getBlockState(mutablePos).getBlock();
                     
-                    if (detectBuddingAmethyst.get() && block == Blocks.BUDDING_AMETHYST) {
-                        buddingCount++;
-                    }
-                    
-                    if (detectSuspiciousBlocks.get() && isSuspiciousBlock(block)) {
-                        suspiciousCount++;
-                    }
-                    
+                    // Count chests (storage indicators)
                     if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) {
                         chestCount++;
+                    }
+                    
+                    // Count hoppers (redstone/storage systems)
+                    if (block == Blocks.HOPPER) {
+                        hopperCount++;
+                    }
+                    
+                    // Count furnaces (smelting arrays)
+                    if (block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE || block == Blocks.SMOKER) {
+                        furnaceCount++;
+                    }
+                    
+                    // Count player-placed utility blocks
+                    if (block == Blocks.CRAFTING_TABLE || block == Blocks.ENCHANTING_TABLE ||
+                        block == Blocks.ANVIL || block == Blocks.GRINDSTONE ||
+                        block == Blocks.STONECUTTER || block == Blocks.LOOM ||
+                        block == Blocks.CARTOGRAPHY_TABLE || block == Blocks.SMITHING_TABLE) {
+                        craftingCount++;
+                    }
+                    
+                    // Count rails (minecart systems)
+                    if (block == Blocks.RAIL || block == Blocks.POWERED_RAIL || 
+                        block == Blocks.DETECTOR_RAIL || block == Blocks.ACTIVATOR_RAIL) {
+                        railCount++;
                     }
                 }
             }
         }
         
-        // Add detections based on chunk scan results
-        if (buddingCount > 0) {
-            addChunkDetection(packedPos, CONFIDENCE_BUDDING_AMETHYST, "AMETHYST GEODE (" + buddingCount + " blocks)");
+        // Store counts
+        if (chestCount > 0) chestCounts.put(pos, chestCount);
+        if (hopperCount > 0) hopperCounts.put(pos, hopperCount);
+        if (furnaceCount > 0) furnaceCounts.put(pos, furnaceCount);
+        
+        int totalPlayerBlocks = chestCount + hopperCount + furnaceCount + craftingCount + railCount;
+        if (totalPlayerBlocks > 0) playerBlockCounts.put(pos, totalPlayerBlocks);
+        
+        // HIGH CONFIDENCE DETECTIONS - Multiple chests (storage room)
+        if (chestCount >= chestThreshold.get()) {
+            addDetection(packedPos, CONFIDENCE_CHEST_CLUSTER, 
+                String.format("§eSTORAGE ROOM §7(%d chests)", chestCount));
         }
         
-        if (chestCount > 0) {
-            addChunkDetection(packedPos, CONFIDENCE_CHEST, "SURFACE CHEST (" + chestCount + ")");
+        // Multiple hoppers (item transport system)
+        if (hopperCount >= hopperThreshold.get()) {
+            addDetection(packedPos, CONFIDENCE_STORAGE_CONCENTRATION,
+                String.format("§eITEM TRANSPORT §7(%d hoppers)", hopperCount));
         }
         
-        if (suspiciousCount >= 3) {
-            addChunkDetection(packedPos, CONFIDENCE_SUSPICIOUS, "SUSPICIOUS BLOCKS (" + suspiciousCount + ")");
+        // Multiple furnaces (smelting array)
+        if (furnaceCount >= furnaceThreshold.get()) {
+            addDetection(packedPos, CONFIDENCE_FURNACE_CLUSTER,
+                String.format("§7SMELTING ARRAY §7(%d furnaces)", furnaceCount));
         }
-    }
-    
-    private boolean isSuspiciousBlock(Block block) {
-        return block == Blocks.DIAMOND_ORE ||
-               block == Blocks.DEEPSLATE_DIAMOND_ORE ||
-               block == Blocks.EMERALD_ORE ||
-               block == Blocks.DEEPSLATE_EMERALD_ORE ||
-               block == Blocks.ANCIENT_DEBRIS ||
-               block == Blocks.SPAWNER;
+        
+        // Many player-placed blocks (active base)
+        if (totalPlayerBlocks >= playerBlockThreshold.get()) {
+            addDetection(packedPos, CONFIDENCE_PLAYER_BLOCKS,
+                String.format("§aPLAYER BASE §7(%d player blocks)", totalPlayerBlocks));
+        }
     }
     
     // ============================================================
     // DETECTION ADDITION
     // ============================================================
     
-    private void addDetection(BlockPos pos, int confidence, String reason) {
-        ChunkPos chunkPos = new ChunkPos(pos);
-        long packedPos = chunkPos.toLong();
-        addChunkDetection(packedPos, confidence, reason);
-    }
-    
-    private void addChunkDetection(long packedPos, int confidence, String reason) {
+    private void addDetection(long packedPos, int confidence, String reason) {
         ChunkDetectionData existing = detectedChunks.get(packedPos);
         
         if (existing == null) {
@@ -630,10 +522,12 @@ public class BaseLeakDebug extends Module {
                 notifyQueue.add(packedPos);
             }
         } else {
-            int oldConfidence = existing.confidence;
-            existing.update(confidence, reason);
-            if (existing.confidence > oldConfidence && !notifiedChunks.contains(packedPos)) {
-                notifyQueue.add(packedPos);
+            if (confidence > existing.confidence) {
+                existing.confidence = confidence;
+                existing.reason = reason;
+                if (!notifiedChunks.contains(packedPos)) {
+                    notifyQueue.add(packedPos);
+                }
             }
         }
     }
@@ -658,7 +552,7 @@ public class BaseLeakDebug extends Module {
     }
     
     private void processNotification(long packedPos) {
-        if (notifyCooldown.get() && notifiedChunks.contains(packedPos)) return;
+        if (notifiedChunks.contains(packedPos)) return;
         
         ChunkDetectionData data = detectedChunks.get(packedPos);
         if (data == null) return;
@@ -677,20 +571,17 @@ public class BaseLeakDebug extends Module {
         
         notifiedChunks.add(packedPos);
         
-        if (chatNotify.get()) {
-            String confidenceStr = data.getConfidenceString();
-            String color = data.confidence >= 80 ? "§c" : data.confidence >= 60 ? "§6" : "§e";
-            
-            String message = String.format(
-                "§8[§c§lBLD§8] §f[§e%d, %d§f] %s §7- %s §8(§f%s§8) §7- %s",
-                chunkX, chunkZ, color, data.reason, confidenceStr, 
-                data.confidence >= 80 ? "§cHIGH CONFIDENCE" : data.confidence >= 60 ? "§6MEDIUM" : "§eLOW"
-            );
-            ChatUtils.info("BaseLeakDebug", message);
-        }
+        String confidenceStr = data.getConfidenceString();
+        String bracketColor = data.confidence >= 90 ? "§c" : data.confidence >= 75 ? "§6" : "§e";
         
-        if (soundNotify.get() && mc.player != null) {
-            float pitch = data.confidence >= 80 ? 2.0f : data.confidence >= 60 ? 1.5f : 1.0f;
+        String message = String.format(
+            "§8[§c§lBLD§8] %s[§e%d, §e%d§8] §7- %s §8(§f%s§8) §7- §e%.0f blocks away",
+            bracketColor, chunkX, chunkZ, data.reason, confidenceStr, distance
+        );
+        ChatUtils.info("BaseLeakDebug", message);
+        
+        if (mc.player != null) {
+            float pitch = data.confidence >= 90 ? 2.0f : data.confidence >= 75 ? 1.5f : 1.0f;
             mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, pitch);
         }
     }
@@ -707,15 +598,6 @@ public class BaseLeakDebug extends Module {
         
         for (ChunkDetectionData data : detectedChunks.values()) {
             if (!data.isValid()) continue;
-            if (mc.player != null) {
-                int chunkX = ChunkPos.getPackedX(data.packedPos);
-                int chunkZ = ChunkPos.getPackedZ(data.packedPos);
-                double centerX = chunkX * 16.0 + 8.0;
-                double centerZ = chunkZ * 16.0 + 8.0;
-                double dx = centerX - mc.player.getX();
-                double dz = centerZ - mc.player.getZ();
-                if (Math.sqrt(dx * dx + dz * dz) < minDistance.get()) continue;
-            }
             
             int chunkX = ChunkPos.getPackedX(data.packedPos);
             int chunkZ = ChunkPos.getPackedZ(data.packedPos);
@@ -723,7 +605,7 @@ public class BaseLeakDebug extends Module {
             double z1 = chunkZ * 16.0;
             double x2 = x1 + 16.0;
             double z2 = z1 + 16.0;
-            double yLevel = highlightHeight.get();
+            double yLevel = 60.0;
             
             Color color = data.getColor();
             Box box = new Box(x1, yLevel, z1, x2, yLevel + 0.5, z2);
@@ -741,17 +623,13 @@ public class BaseLeakDebug extends Module {
         
         for (ChunkDetectionData data : detectedChunks.values()) {
             if (!data.isValid()) continue;
-            if (mc.player != null) {
-                int chunkX = ChunkPos.getPackedX(data.packedPos);
-                int chunkZ = ChunkPos.getPackedZ(data.packedPos);
-                double centerX = chunkX * 16.0 + 8.0;
-                double centerZ = chunkZ * 16.0 + 8.0;
-                double dx = centerX - mc.player.getX();
-                double dz = centerZ - mc.player.getZ();
-                if (Math.sqrt(dx * dx + dz * dz) < minDistance.get()) continue;
-                
-                tracerPoints.add(new TracerPoint(new Vec3d(centerX, highlightHeight.get() + 0.25, centerZ), TRACER_BASE));
-            }
+            
+            int chunkX = ChunkPos.getPackedX(data.packedPos);
+            int chunkZ = ChunkPos.getPackedZ(data.packedPos);
+            double centerX = chunkX * 16.0 + 8.0;
+            double centerZ = chunkZ * 16.0 + 8.0;
+            
+            tracerPoints.add(new TracerPoint(new Vec3d(centerX, 65.0, centerZ), TRACER_BASE));
         }
         
         lastTracerUpdate = now;
@@ -772,12 +650,10 @@ public class BaseLeakDebug extends Module {
             return !mc.world.isChunkLoaded(x, z);
         });
         
-        spawnerRecords.entrySet().removeIf(e -> !e.getValue().isValid());
-        chestRecords.entrySet().removeIf(e -> !e.getValue().isValid());
-        furnaceRecords.entrySet().removeIf(e -> !e.getValue().isValid());
-        beaconRecords.entrySet().removeIf(e -> !e.getValue().isValid());
-        
-        globalNotifCooldown.entrySet().removeIf(e -> now - e.getValue() > 30000);
+        // Clear notified chunks after 5 minutes to allow re-notification
+        if (tickCounter % 600 == 0) {
+            notifiedChunks.clear();
+        }
     }
     
     // ============================================================
@@ -787,7 +663,6 @@ public class BaseLeakDebug extends Module {
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (!isActive || mc.player == null) return;
-        if (!chunkHighlight.get()) return;
         
         Vec3d startPos = mc.player.getCameraPosVec(event.tickDelta);
         
@@ -797,12 +672,10 @@ public class BaseLeakDebug extends Module {
                 box.fill, box.line, ShapeMode.Both, 0);
         }
         
-        if (tracers.get()) {
-            for (TracerPoint tracer : tracerPoints) {
-                if (!tracer.isValid()) continue;
-                event.renderer.line(startPos.x, startPos.y, startPos.z,
-                    tracer.pos.x, tracer.pos.y, tracer.pos.z, tracer.color);
-            }
+        for (TracerPoint tracer : tracerPoints) {
+            if (!tracer.isValid()) continue;
+            event.renderer.line(startPos.x, startPos.y, startPos.z,
+                tracer.pos.x, tracer.pos.y, tracer.pos.z, tracer.color);
         }
     }
     
@@ -812,9 +685,8 @@ public class BaseLeakDebug extends Module {
     
     @Override
     public String getInfoString() {
-        int high = (int) detectedChunks.values().stream().filter(d -> d.confidence >= 80).count();
-        int medium = (int) detectedChunks.values().stream().filter(d -> d.confidence >= 60 && d.confidence < 80).count();
-        int low = (int) detectedChunks.values().stream().filter(d -> d.confidence < 60).count();
-        return String.format("§c%d §7| §6%d §7| §e%d", high, medium, low);
+        int high = (int) detectedChunks.values().stream().filter(d -> d.confidence >= 75).count();
+        int medium = (int) detectedChunks.values().stream().filter(d -> d.confidence >= 60 && d.confidence < 75).count();
+        return String.format("§c%d §7| §e%d", high, medium);
     }
 }
